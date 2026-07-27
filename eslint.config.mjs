@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Równoległe dist diry agentów (NEXT_DIST_DIR) i wygenerowany klient Prismy:
+    ".next-*/**",
+    "src/generated/**",
   ]),
 ]);
 

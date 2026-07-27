@@ -1,0 +1,72 @@
+import { redirect } from "next/navigation";
+import { auth } from "@/lib/auth";
+import { loadServiceContext } from "@/lib/availability-data";
+import { SiteHeader } from "@/components/marketplace/site-header";
+import { BookingFlow, type BookingFlowData } from "./booking-flow";
+
+export const dynamic = "force-dynamic";
+
+/**
+ * Flow rezerwacji (kroki 1-3 + sukces). Serwer ładuje kontekst usługi
+ * i ewentualną sesję; cała interakcja dzieje się w kliencie, ze stanem
+ * kroków w searchParams (działa back button).
+ */
+export default async function BookingPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ serviceId?: string }>;
+}) {
+  const { slug } = await params;
+  const { serviceId } = await searchParams;
+
+  if (!serviceId) redirect(`/b/${slug}`);
+
+  const context = await loadServiceContext(slug, serviceId);
+  if (!context || context.service.priceType === "ON_REQUEST") {
+    redirect(`/b/${slug}`);
+  }
+
+  // Auth defensywnie — logowanie buduje inny agent; flow gościa ma działać
+  // także bez skonfigurowanej sesji.
+  let user: BookingFlowData["user"] = null;
+  try {
+    const session = await auth();
+    if (session?.user?.id) {
+      user = {
+        name: session.user.name ?? null,
+        email: session.user.email ?? null,
+      };
+    }
+  } catch {
+    user = null;
+  }
+
+  const data: BookingFlowData = {
+    businessSlug: context.business.slug,
+    businessName: context.business.name,
+    address: `${context.location.addressLine1}, ${context.location.city}`,
+    timezone: context.location.timezone,
+    slotGranularityMin: context.location.slotGranularityMin,
+    minLeadTimeMin: context.location.minLeadTimeMin,
+    cancellationCutoffHours: context.location.cancellationCutoffHours,
+    service: {
+      id: context.service.id,
+      name: context.service.name,
+      durationMin: context.service.durationMin,
+      priceCents: context.service.priceCents,
+      priceType: context.service.priceType,
+      currency: context.service.currency,
+    },
+    resources: context.resources,
+    user,
+  };
+
+  return (
+    <>
+      <SiteHeader />
+      <BookingFlow data={data} />
+    </>
+  );
+}

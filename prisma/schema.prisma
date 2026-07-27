@@ -1,0 +1,733 @@
+// Planner — schemat bazy danych
+// Dokumentacja modelu domenowego: project_plan.md (sekcja 2)
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enumy
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  CUSTOMER
+  BUSINESS_OWNER
+  STAFF
+  PLATFORM_ADMIN
+}
+
+enum BusinessType {
+  BARBER
+  HAIR_SALON
+  BEAUTY
+  NAILS
+  SPA
+  TATTOO
+  FITNESS
+  AUTO_SERVICE
+  MEDICAL
+  RESTAURANT
+  OTHER
+}
+
+enum BusinessStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  SUSPENDED
+}
+
+/// Zasób rezerwowalny. STAFF = pracownik, TABLE = stolik (faza 7),
+/// ROOM/EQUIPMENT = gabinet, fotel, stanowisko.
+enum ResourceType {
+  STAFF
+  ROOM
+  EQUIPMENT
+  TABLE
+}
+
+enum StaffRole {
+  OWNER
+  MANAGER
+  EMPLOYEE
+}
+
+enum PriceType {
+  FIXED
+  FROM
+  FREE
+  ON_REQUEST
+}
+
+enum TimeOffType {
+  VACATION
+  SICK_LEAVE
+  BREAK
+  HOLIDAY
+  BLOCKED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED_BY_CUSTOMER
+  CANCELLED_BY_BUSINESS
+  NO_SHOW
+}
+
+enum BookingSource {
+  WEB_MARKETPLACE
+  WEB_WIDGET
+  MOBILE_APP
+  MANUAL_STAFF
+}
+
+enum NotificationChannel {
+  EMAIL
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+/// MANUAL = rozliczenie na miejscu (gotówka/terminal) — stan domyślny,
+/// dopóki firma nie podepnie bramki płatniczej.
+enum PaymentProvider {
+  MANUAL
+  STRIPE
+  PRZELEWY24
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+enum PaymentKind {
+  DEPOSIT
+  FULL
+  NO_SHOW_FEE
+}
+
+enum SubscriptionPlan {
+  FREE
+  PRO
+  TEAM
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
+// ---------------------------------------------------------------------------
+// Auth.js (Prisma adapter)
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime? @map("email_verified") @db.Timestamptz(3)
+  image         String?
+  phone         String?   @unique
+  passwordHash  String?   @map("password_hash")
+  role          UserRole  @default(CUSTOMER)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  accounts         Account[]
+  sessions         Session[]
+  ownedBusinesses  Business[]     @relation("BusinessOwner")
+  staffProfiles    StaffProfile[]
+  bookings         Booking[]      @relation("BookingCustomer")
+  customerProfiles Customer[]
+  reviews          Review[]
+  favorites        Favorite[]
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime @db.Timestamptz(3)
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Firma
+// ---------------------------------------------------------------------------
+
+model Business {
+  id          String         @id @default(cuid())
+  slug        String         @unique
+  name        String
+  type        BusinessType
+  status      BusinessStatus @default(DRAFT)
+  description String?
+  logoUrl     String?        @map("logo_url")
+  coverUrl    String?        @map("cover_url")
+  ownerId     String         @map("owner_id")
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  /// Po ilu nieodwołanych nieobecnościach klient jest blokowany w tej firmie.
+  noShowLimit Int @default(3) @map("no_show_limit")
+
+  owner        User              @relation("BusinessOwner", fields: [ownerId], references: [id])
+  locations    Location[]
+  staff        StaffProfile[]
+  categories   ServiceCategory[]
+  services     Service[]
+  customers    Customer[]
+  bookings     Booking[]
+  reviews      Review[]
+  favorites    Favorite[]
+  payments     Payment[]
+  subscription Subscription?
+
+  @@index([ownerId])
+  @@index([status, type])
+  @@map("businesses")
+}
+
+model Location {
+  id           String  @id @default(cuid())
+  businessId   String  @map("business_id")
+  name         String
+  addressLine1 String  @map("address_line1")
+  addressLine2 String? @map("address_line2")
+  city         String
+  postalCode   String  @map("postal_code")
+  country      String  @default("PL")
+  latitude     Float?
+  longitude    Float?
+  phone        String?
+  /// Strefa czasowa IANA — cała prezentacja czasu liczona względem niej.
+  timezone     String  @default("Europe/Warsaw")
+
+  /// Ustawienia silnika dostępności
+  slotGranularityMin      Int @default(15) @map("slot_granularity_min")
+  minLeadTimeMin          Int @default(60) @map("min_lead_time_min")
+  maxAdvanceDays          Int @default(60) @map("max_advance_days")
+  cancellationCutoffHours Int @default(24) @map("cancellation_cutoff_hours")
+
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business     Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  resources    Resource[]
+  openingHours OpeningHours[]
+  timeOff      TimeOff[]
+  bookings     Booking[]
+
+  @@index([businessId])
+  @@index([city])
+  @@map("locations")
+}
+
+/// Godziny otwarcia lokalu — zewnętrzna granica dostępności.
+model OpeningHours {
+  id          String @id @default(cuid())
+  locationId  String @map("location_id")
+  /// 0 = poniedziałek ... 6 = niedziela
+  weekday     Int
+  /// Minuty od północy czasu lokalnego, np. 9:30 = 570
+  startMinute Int    @map("start_minute")
+  endMinute   Int    @map("end_minute")
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([locationId, weekday])
+  @@map("opening_hours")
+}
+
+// ---------------------------------------------------------------------------
+// Zasoby i pracownicy
+// ---------------------------------------------------------------------------
+
+model Resource {
+  id          String       @id @default(cuid())
+  locationId  String       @map("location_id")
+  type        ResourceType @default(STAFF)
+  name        String
+  description String?
+  imageUrl    String?      @map("image_url")
+  /// Pojemność — używane dla stolików (faza 7), null dla pracowników.
+  capacityMin Int?         @map("capacity_min")
+  capacityMax Int?         @map("capacity_max")
+  sortOrder   Int          @default(0) @map("sort_order")
+  isActive    Boolean      @default(true) @map("is_active")
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  location     Location          @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  staffProfile StaffProfile?
+  services     ServiceResource[]
+  workingHours WorkingHours[]
+  timeOff      TimeOff[]
+  bookingItems BookingItem[]
+  holds        Hold[]
+
+  @@index([locationId, type])
+  @@map("resources")
+}
+
+model StaffProfile {
+  id           String    @id @default(cuid())
+  businessId   String    @map("business_id")
+  resourceId   String    @unique @map("resource_id")
+  userId       String?   @map("user_id")
+  /// E-mail zaproszenia, dopóki pracownik nie założy konta.
+  invitedEmail String?   @map("invited_email")
+  role         StaffRole @default(EMPLOYEE)
+  title        String?
+  bio          String?
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  user     User?    @relation(fields: [userId], references: [id])
+
+  @@unique([businessId, userId])
+  @@index([businessId])
+  @@map("staff_profiles")
+}
+
+/// Cykliczny grafik pracy zasobu. Wersjonowany przez validFrom/validTo,
+/// dzięki czemu zmiana grafiku nie przepisuje historii.
+model WorkingHours {
+  id          String    @id @default(cuid())
+  resourceId  String    @map("resource_id")
+  weekday     Int
+  startMinute Int       @map("start_minute")
+  endMinute   Int       @map("end_minute")
+  validFrom   DateTime? @map("valid_from") @db.Date
+  validTo     DateTime? @map("valid_to") @db.Date
+
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@index([resourceId, weekday])
+  @@map("working_hours")
+}
+
+/// Urlop, przerwa, święto lub blokada ad-hoc — dla zasobu albo całej lokalizacji.
+model TimeOff {
+  id         String      @id @default(cuid())
+  resourceId String?     @map("resource_id")
+  locationId String?     @map("location_id")
+  type       TimeOffType @default(BLOCKED)
+  startAt    DateTime    @map("start_at") @db.Timestamptz(3)
+  endAt      DateTime    @map("end_at") @db.Timestamptz(3)
+  reason     String?
+  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  resource Resource? @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  location Location? @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([resourceId, startAt, endAt])
+  @@index([locationId, startAt, endAt])
+  @@map("time_off")
+}
+
+// ---------------------------------------------------------------------------
+// Usługi i cennik
+// ---------------------------------------------------------------------------
+
+model ServiceCategory {
+  id         String @id @default(cuid())
+  businessId String @map("business_id")
+  name       String
+  sortOrder  Int    @default(0) @map("sort_order")
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  services Service[]
+
+  @@index([businessId])
+  @@map("service_categories")
+}
+
+model Service {
+  id          String  @id @default(cuid())
+  businessId  String  @map("business_id")
+  categoryId  String? @map("category_id")
+  name        String
+  description String?
+
+  /// Czas trwania usługi w minutach — bez buforów.
+  durationMin     Int @map("duration_min")
+  /// Bufory blokują grafik, ale nie są widoczne dla klienta.
+  bufferBeforeMin Int @default(0) @map("buffer_before_min")
+  bufferAfterMin  Int @default(0) @map("buffer_after_min")
+
+  /// Ceny w groszach — brak arytmetyki zmiennoprzecinkowej na pieniądzach.
+  priceCents Int       @map("price_cents")
+  priceType  PriceType @default(FIXED) @map("price_type")
+  currency   String    @default("PLN")
+
+  /// Zadatek wymagany przy rezerwacji online. depositCents = null oznacza
+  /// „bez zadatku", nawet gdy depositRequired zostanie omyłkowo ustawione.
+  depositRequired Boolean  @default(false) @map("deposit_required")
+  depositCents    Int?     @map("deposit_cents")
+  onlineBookable  Boolean  @default(true) @map("online_bookable")
+  isActive        Boolean  @default(true) @map("is_active")
+  sortOrder       Int      @default(0) @map("sort_order")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business     Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  category     ServiceCategory?  @relation(fields: [categoryId], references: [id])
+  resources    ServiceResource[]
+  bookingItems BookingItem[]
+
+  @@index([businessId, isActive])
+  @@map("services")
+}
+
+/// Który zasób wykonuje daną usługę — z opcjonalnym nadpisaniem czasu i ceny.
+model ServiceResource {
+  id                  String @id @default(cuid())
+  serviceId           String @map("service_id")
+  resourceId          String @map("resource_id")
+  durationMinOverride Int?   @map("duration_min_override")
+  priceCentsOverride  Int?   @map("price_cents_override")
+
+  service  Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, resourceId])
+  @@index([resourceId])
+  @@map("service_resources")
+}
+
+// ---------------------------------------------------------------------------
+// Rezerwacje
+// ---------------------------------------------------------------------------
+
+model Booking {
+  id         String @id @default(cuid())
+  businessId String @map("business_id")
+  locationId String @map("location_id")
+
+  /// Rezerwacja zalogowanego klienta...
+  customerUserId String? @map("customer_user_id")
+  customerId     String? @map("customer_id")
+  /// ...albo gościa bez konta.
+  guestName      String? @map("guest_name")
+  guestEmail     String? @map("guest_email")
+  guestPhone     String? @map("guest_phone")
+
+  status          BookingStatus @default(PENDING)
+  source          BookingSource @default(WEB_MARKETPLACE)
+  /// Zakres całej wizyty (od pierwszej do ostatniej pozycji, bez buforów).
+  startAt         DateTime      @map("start_at") @db.Timestamptz(3)
+  endAt           DateTime      @map("end_at") @db.Timestamptz(3)
+  totalPriceCents Int           @map("total_price_cents")
+  currency        String        @default("PLN")
+  /// Liczba osób — używane przez rezerwacje stolików (faza 7).
+  partySize       Int?          @map("party_size")
+  customerNote    String?       @map("customer_note")
+  internalNote    String?       @map("internal_note")
+
+  cancelledAt        DateTime? @map("cancelled_at") @db.Timestamptz(3)
+  cancellationReason String?   @map("cancellation_reason")
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business      Business       @relation(fields: [businessId], references: [id])
+  location      Location       @relation(fields: [locationId], references: [id])
+  customer      Customer?      @relation(fields: [customerId], references: [id])
+  user          User?          @relation("BookingCustomer", fields: [customerUserId], references: [id])
+  items         BookingItem[]
+  review        Review?
+  notifications Notification[]
+  payments      Payment[]
+
+  @@index([businessId, startAt])
+  @@index([locationId, startAt])
+  @@index([customerUserId, startAt])
+  @@index([status, startAt])
+  @@map("bookings")
+}
+
+/// Pojedyncza usługa w ramach rezerwacji, przypięta do konkretnego zasobu.
+/// To ten wiersz — nie Booking — blokuje grafik i podlega ograniczeniu
+/// wykluczającemu nakładanie się zakresów (exclusion constraint w migracji).
+model BookingItem {
+  id         String @id @default(cuid())
+  bookingId  String @map("booking_id")
+  serviceId  String @map("service_id")
+  resourceId String @map("resource_id")
+
+  /// Czas widoczny dla klienta.
+  startAt        DateTime @map("start_at") @db.Timestamptz(3)
+  endAt          DateTime @map("end_at") @db.Timestamptz(3)
+  /// Czas faktycznie blokowany w grafiku = start/end powiększony o bufory.
+  blockedStartAt DateTime @map("blocked_start_at") @db.Timestamptz(3)
+  blockedEndAt   DateTime @map("blocked_end_at") @db.Timestamptz(3)
+
+  durationMin     Int @map("duration_min")
+  bufferBeforeMin Int @default(0) @map("buffer_before_min")
+  bufferAfterMin  Int @default(0) @map("buffer_after_min")
+  priceCents      Int @map("price_cents")
+  sortOrder       Int @default(0) @map("sort_order")
+
+  /// Czy pozycja nadal blokuje grafik. Utrzymywane triggerem na podstawie
+  /// statusu rezerwacji — patrz migracja `booking_no_overlap`. Nie ustawiaj
+  /// ręcznie: exclusion constraint w bazie opiera się na tej kolumnie.
+  isBlocking Boolean @default(true) @map("is_blocking")
+
+  booking  Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  service  Service  @relation(fields: [serviceId], references: [id])
+  resource Resource @relation(fields: [resourceId], references: [id])
+
+  @@index([bookingId])
+  @@index([resourceId, blockedStartAt, blockedEndAt])
+  @@map("booking_items")
+}
+
+/// Tymczasowa blokada slotu na czas checkoutu (TTL ~10 min).
+model Hold {
+  id         String   @id @default(cuid())
+  resourceId String   @map("resource_id")
+  startAt    DateTime @map("start_at") @db.Timestamptz(3)
+  endAt      DateTime @map("end_at") @db.Timestamptz(3)
+  /// Token sesji checkoutu — pozwala właścicielowi holda dokończyć rezerwację.
+  token      String   @unique
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@index([resourceId, startAt, endAt])
+  @@index([expiresAt])
+  @@map("holds")
+}
+
+// ---------------------------------------------------------------------------
+// CRM i opinie
+// ---------------------------------------------------------------------------
+
+/// Profil klienta w kontekście konkretnej firmy (notatki, historia, tagi).
+model Customer {
+  id         String   @id @default(cuid())
+  businessId String   @map("business_id")
+  userId     String?  @map("user_id")
+  fullName   String   @map("full_name")
+  email      String?
+  phone      String?
+  notes      String?
+  tags       String[] @default([])
+
+  /// Blokada rezerwacji online w tej firmie — skutek polityki no-show
+  /// albo ręcznej decyzji właściciela.
+  isBlocked     Boolean   @default(false) @map("is_blocked")
+  blockedAt     DateTime? @map("blocked_at") @db.Timestamptz(3)
+  blockedReason String?   @map("blocked_reason")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user     User?     @relation(fields: [userId], references: [id])
+  bookings Booking[]
+
+  @@unique([businessId, userId])
+  @@index([businessId, phone])
+  @@map("customers")
+}
+
+// ---------------------------------------------------------------------------
+// Pieniądze i operacje (faza 4)
+// ---------------------------------------------------------------------------
+
+/// Płatność powiązana z rezerwacją: zadatek, pełna przedpłata albo opłata
+/// za nieobecność. Kwoty w groszach, tak jak ceny usług.
+model Payment {
+  id         String @id @default(cuid())
+  bookingId  String @map("booking_id")
+  businessId String @map("business_id")
+
+  provider PaymentProvider @default(MANUAL)
+  kind     PaymentKind     @default(DEPOSIT)
+  status   PaymentStatus   @default(PENDING)
+
+  /// Identyfikator po stronie bramki — unikalny, bo webhook musi być idempotentny.
+  providerPaymentId String? @unique @map("provider_payment_id")
+
+  amountCents   Int    @map("amount_cents")
+  refundedCents Int    @default(0) @map("refunded_cents")
+  currency      String @default("PLN")
+
+  paidAt        DateTime? @map("paid_at") @db.Timestamptz(3)
+  refundedAt    DateTime? @map("refunded_at") @db.Timestamptz(3)
+  failureReason String?   @map("failure_reason")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  booking  Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([businessId, status])
+  @@map("payments")
+}
+
+/// Subskrypcja firmy na platformie. Limity planu (liczba pracowników,
+/// lokalizacji) egzekwowane w kodzie, nie w bazie.
+model Subscription {
+  id         String @id @default(cuid())
+  businessId String @unique @map("business_id")
+
+  plan   SubscriptionPlan   @default(FREE)
+  status SubscriptionStatus @default(TRIALING)
+
+  trialEndsAt       DateTime? @map("trial_ends_at") @db.Timestamptz(3)
+  currentPeriodEnd  DateTime? @map("current_period_end") @db.Timestamptz(3)
+  cancelAtPeriodEnd Boolean   @default(false) @map("cancel_at_period_end")
+
+  provider               PaymentProvider @default(MANUAL)
+  providerCustomerId     String?         @map("provider_customer_id")
+  providerSubscriptionId String?         @unique @map("provider_subscription_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("subscriptions")
+}
+
+/// Ślad zmian wrażliwych operacyjnie — kto anulował wizytę, kto zmienił cennik.
+/// Przy sporze „nie odwoływałem tej wizyty" to jedyne źródło prawdy.
+model AuditLog {
+  id          String  @id @default(cuid())
+  businessId  String? @map("business_id")
+  actorUserId String? @map("actor_user_id")
+
+  /// np. BOOKING_CANCELLED, BOOKING_NO_SHOW, SERVICE_UPDATED, CUSTOMER_BLOCKED
+  action     String
+  entityType String @map("entity_type")
+  entityId   String @map("entity_id")
+  metadata   Json?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([businessId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+/// Ulubione firmy klienta.
+model Favorite {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  businessId String   @map("business_id")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, businessId])
+  @@index([businessId])
+  @@map("favorites")
+}
+
+/// Log wysyłek powiadomień (na razie e-mail). Wiersz powstaje przed próbą
+/// wysyłki i jest aktualizowany statusem — dzięki temu przypomnienia mają
+/// naturalną deduplikację po (bookingId, type).
+model Notification {
+  id        String              @id @default(cuid())
+  channel   NotificationChannel @default(EMAIL)
+  /// np. BOOKING_CONFIRMED_CUSTOMER, BOOKING_CONFIRMED_BUSINESS,
+  /// BOOKING_CANCELLED_CUSTOMER, REMINDER_24H
+  type      String
+  recipient String
+  subject   String?
+  bookingId String?             @map("booking_id")
+  status    NotificationStatus  @default(PENDING)
+  error     String?
+  sentAt    DateTime?           @map("sent_at") @db.Timestamptz(3)
+  createdAt DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId, type])
+  @@index([status, createdAt])
+  @@map("notifications")
+}
+
+model Review {
+  id           String    @id @default(cuid())
+  businessId   String    @map("business_id")
+  bookingId    String    @unique @map("booking_id")
+  authorUserId String    @map("author_user_id")
+  rating       Int
+  comment      String?
+  reply        String?
+  repliedAt    DateTime? @map("replied_at") @db.Timestamptz(3)
+  isPublished  Boolean   @default(true) @map("is_published")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  booking  Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  author   User     @relation(fields: [authorUserId], references: [id])
+
+  @@index([businessId, isPublished])
+  @@map("reviews")
+}

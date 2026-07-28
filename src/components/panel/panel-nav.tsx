@@ -9,15 +9,19 @@ const NAV_ITEMS = [
   { href: "/panel", label: "Kalendarz" },
   { href: "/panel/uslugi", label: "Usługi" },
   { href: "/panel/zespol", label: "Zespół" },
+  { href: "/panel/klienci", label: "Klienci" },
   { href: "/panel/opinie", label: "Opinie" },
+  { href: "/panel/statystyki", label: "Statystyki" },
+  { href: "/panel/aktywnosc", label: "Aktywność" },
   { href: "/panel/ustawienia", label: "Ustawienia" },
   { href: "/panel/plan", label: "Plan" },
 ] as const;
 
 /**
  * Nawigacja pigułkami w ciemnym top-barze — wg przepisu z DESIGN.md.
- * Poniżej `lg` pigułki przewijają się poziomo (bez widocznego paska),
- * a cele dotykowe rosną do ≥44px; od `lg` wygląd jak w prototypie.
+ * Gdy pigułki nie mieszczą się w top-barze, przewijają się poziomo we
+ * własnym kontenerze (bez widocznego paska) — strona nigdy nie scrolluje
+ * poziomo. Poniżej `lg` cele dotykowe rosną do ≥44px.
  */
 export function PanelNav() {
   const pathname = usePathname();
@@ -33,7 +37,7 @@ export function PanelNav() {
   return (
     <nav
       ref={navRef}
-      className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:flex-none lg:overflow-visible"
+      className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
     >
       {NAV_ITEMS.map((item) => {
         const active =

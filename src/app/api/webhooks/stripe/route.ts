@@ -12,8 +12,9 @@ import { markPaymentPaid } from "@/lib/payments";
  * webhook bez weryfikacji byłby otwartą furtką do oznaczania płatności.
  *
  * Obsługujemy checkout.session.completed → markPaymentPaid; idempotencja
- * siedzi w markPaymentPaid (strażnik statusu PENDING → PAID po
- * providerPaymentId), więc powtórzone dostarczenie eventu jest bezpieczne.
+ * siedzi w markPaymentPaid (strażnik statusu w UPDATE po providerPaymentId),
+ * więc powtórzone dostarczenie eventu jest bezpieczne. Wpłatę do płatności
+ * anulowanej wraz z rezerwacją markPaymentPaid zapisuje i od razu zwraca.
  */
 
 /** Maksymalny wiek podpisu — 5 minut, jak w SDK Stripe. */

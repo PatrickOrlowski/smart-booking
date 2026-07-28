@@ -3,13 +3,18 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
 import {
   ForbiddenError,
   UnauthorizedError,
   requireBusinessManager,
 } from "@/lib/authz";
 import { localDayMinutesToUtc } from "@/lib/time";
-import { PLAN_LABELS, canAddStaff } from "@/lib/subscription";
+import {
+  PLAN_LABELS,
+  canAddStaff,
+  withBusinessPlanLock,
+} from "@/lib/subscription";
 
 type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -65,15 +70,6 @@ export async function addStaffAction(input: unknown): Promise<ActionResult> {
   try {
     await requireBusinessManager(data.businessId);
 
-    // Limit pracowników wynika z planu subskrypcji firmy.
-    const staffLimit = await canAddStaff(data.businessId);
-    if (!staffLimit.allowed) {
-      return {
-        ok: false,
-        error: `Limit pracowników planu ${PLAN_LABELS[staffLimit.plan]} (${staffLimit.used}/${staffLimit.limit}). Przejdź na wyższy plan w /panel/plan.`,
-      };
-    }
-
     const location = await prisma.location.findFirst({
       where: { businessId: data.businessId },
       orderBy: { createdAt: "asc" },
@@ -83,32 +79,124 @@ export async function addStaffAction(input: unknown): Promise<ActionResult> {
       return { ok: false, error: "Firma nie ma lokalizacji" };
     }
 
-    const maxSort = await prisma.resource.aggregate({
-      where: { locationId: location.id, type: "STAFF" },
-      _max: { sortOrder: true },
-    });
+    // Sprawdzenie limitu i wstawienie pracownika w jednej transakcji
+    // z advisory lockiem per firma — inaczej dwa równoległe żądania przy
+    // used = limit-1 oba przechodzą check i firma ląduje ponad limitem planu.
+    const limited = await withBusinessPlanLock(data.businessId, async (tx) => {
+      const staffLimit = await canAddStaff(data.businessId, tx);
+      if (!staffLimit.allowed) return staffLimit;
 
-    await prisma.resource.create({
-      data: {
-        locationId: location.id,
-        type: "STAFF",
-        name: data.name,
-        sortOrder: (maxSort._max.sortOrder ?? -1) + 1,
-        staffProfile: {
-          create: {
-            businessId: data.businessId,
-            role: "EMPLOYEE",
-            title: data.title || null,
-            invitedEmail: data.invitedEmail || null,
+      const maxSort = await tx.resource.aggregate({
+        where: { locationId: location.id, type: "STAFF" },
+        _max: { sortOrder: true },
+      });
+
+      await tx.resource.create({
+        data: {
+          locationId: location.id,
+          type: "STAFF",
+          name: data.name,
+          sortOrder: (maxSort._max.sortOrder ?? -1) + 1,
+          staffProfile: {
+            create: {
+              businessId: data.businessId,
+              role: "EMPLOYEE",
+              title: data.title || null,
+              invitedEmail: data.invitedEmail || null,
+            },
           },
         },
-      },
+      });
+      return null;
     });
+
+    if (limited) {
+      return {
+        ok: false,
+        error: `Limit pracowników planu ${PLAN_LABELS[limited.plan]} (${limited.used}/${limited.limit}). Przejdź na wyższy plan w /panel/plan.`,
+      };
+    }
   } catch (error) {
     return failure(error, "Nie udało się dodać pracownika");
   }
 
   revalidateTeam();
+  return { ok: true };
+}
+
+const deactivateStaffSchema = z.object({
+  businessId: z.string().min(1),
+  resourceId: z.string().min(1),
+});
+
+/**
+ * Dezaktywacja pracownika — jedyna droga zejścia poniżej limitu niższego
+ * planu (downgrade odrzuca `changePlan`, dopóki zespół jest za duży).
+ *
+ * Nie kasujemy wierszy (osierociłyby historię rezerwacji), tylko gasimy
+ * Resource.isActive i StaffProfile.isActive: pracownik znika z kalendarza,
+ * dostępności i limitów planu. Przyszłe wizyty muszą być wcześniej odwołane
+ * albo przepisane na kogoś innego — inaczej klient przyszedłby na termin,
+ * którego nikt nie obsłuży.
+ */
+export async function deactivateStaffAction(
+  input: unknown,
+): Promise<ActionResult> {
+  const parsed = deactivateStaffSchema.safeParse(input);
+  if (!parsed.success) return { ok: false, error: "Nieprawidłowe dane" };
+  const data = parsed.data;
+
+  try {
+    const { user } = await requireBusinessManager(data.businessId);
+
+    const resource = await findBusinessStaffResource(
+      data.businessId,
+      data.resourceId,
+    );
+    if (!resource) return { ok: false, error: "Nie znaleziono pracownika" };
+    if (!resource.isActive) {
+      return { ok: false, error: "Pracownik jest już nieaktywny" };
+    }
+
+    const upcoming = await prisma.bookingItem.count({
+      where: {
+        resourceId: resource.id,
+        endAt: { gt: new Date() },
+        booking: { status: { in: ["PENDING", "CONFIRMED"] } },
+      },
+    });
+    if (upcoming > 0) {
+      return {
+        ok: false,
+        error: `Pracownik ma ${upcoming} nadchodzących wizyt. Odwołaj je albo przepisz na inną osobę, zanim go dezaktywujesz.`,
+      };
+    }
+
+    await prisma.$transaction([
+      prisma.resource.update({
+        where: { id: resource.id },
+        data: { isActive: false },
+      }),
+      prisma.staffProfile.updateMany({
+        where: { resourceId: resource.id },
+        data: { isActive: false },
+      }),
+    ]);
+
+    await logAudit({
+      businessId: data.businessId,
+      actorUserId: user.id,
+      action: "STAFF_DEACTIVATED",
+      entityType: "Resource",
+      entityId: resource.id,
+      metadata: { name: resource.name },
+    });
+  } catch (error) {
+    return failure(error, "Nie udało się dezaktywować pracownika");
+  }
+
+  revalidateTeam();
+  revalidatePath("/panel/plan");
   return { ok: true };
 }
 

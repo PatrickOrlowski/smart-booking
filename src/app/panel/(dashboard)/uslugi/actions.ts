@@ -8,6 +8,7 @@ import {
   UnauthorizedError,
   requireBusinessManager,
 } from "@/lib/authz";
+import { PLAN_LABELS, getBusinessSubscription } from "@/lib/subscription";
 import { PriceType } from "@/generated/prisma/enums";
 
 type ActionResult = { ok: true } | { ok: false; error: string };
@@ -86,6 +87,19 @@ export async function saveServiceAction(input: unknown): Promise<ActionResult> {
 
   try {
     await requireBusinessManager(data.businessId);
+
+    // Zadatki online to wyróżnik płatnych planów (karta PRO obiecuje
+    // „Zadatki za usługi premium") — bez tej bramki plan FREE dostawał je
+    // za darmo. Liczy się plan efektywny, więc wygasłe PRO też traci funkcję.
+    if (data.depositRequired) {
+      const subscription = await getBusinessSubscription(data.businessId);
+      if (subscription.effectivePlan === "FREE") {
+        return {
+          ok: false,
+          error: `Zadatki online są dostępne od planu ${PLAN_LABELS.PRO}. Zmień plan w /panel/plan albo wyłącz zadatek.`,
+        };
+      }
+    }
 
     // Multi-tenant: każdy identyfikator z formularza weryfikowany
     // względem firmy przed zapisem.

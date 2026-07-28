@@ -140,6 +140,11 @@ export type PaymentSelector =
  * Oznacza płatność jako opłaconą. Idempotentne: strażnik statusu w UPDATE
  * (PENDING → PAID) sprawia, że powtórzony webhook nic nie zmienia i nie
  * dubluje wpisu audytu.
+ *
+ * Osobno obsłużona jest wpłata do płatności już CANCELLED (klient dokończył
+ * checkout po anulowaniu rezerwacji, zanim sesja wygasła): zamiast po cichu
+ * zignorować przelew, zapisujemy go (PAID + audyt) i od razu zwracamy —
+ * wcześniej pieniądze nie zostawiały żadnego śladu w systemie.
  */
 export async function markPaymentPaid(
   selector: PaymentSelector,
@@ -150,13 +155,42 @@ export async function markPaymentPaid(
       ? { id: selector.paymentId }
       : { providerPaymentId: selector.providerPaymentId };
 
+  const before = await prisma.payment.findFirst({
+    where,
+    select: { id: true, status: true },
+  });
+  if (!before) return null;
+
   const updated = await prisma.payment.updateMany({
-    where: { ...where, status: "PENDING" },
+    where: { id: before.id, status: { in: ["PENDING", "CANCELLED"] } },
     data: { status: "PAID", paidAt: new Date() },
   });
 
-  const payment = await prisma.payment.findFirst({ where });
+  const payment = await prisma.payment.findUnique({ where: { id: before.id } });
   if (!payment) return null;
+
+  // Wpłata po anulowaniu: ślad w audycie i natychmiastowy zwrot.
+  if (updated.count > 0 && before.status === "CANCELLED") {
+    await logAudit({
+      businessId: payment.businessId,
+      actorUserId: options.actorUserId ?? null,
+      action: "PAYMENT_PAID_AFTER_CANCELLATION",
+      entityType: "Payment",
+      entityId: payment.id,
+      metadata: {
+        bookingId: payment.bookingId,
+        provider: payment.provider,
+        kind: payment.kind,
+        amountCents: payment.amountCents,
+        currency: payment.currency,
+      },
+    });
+    const result = await refundPayment(payment.id, {
+      actorUserId: options.actorUserId ?? null,
+      reason: "Wpłata po anulowaniu rezerwacji",
+    });
+    return result.payment ?? payment;
+  }
 
   if (updated.count > 0) {
     await logAudit({
@@ -268,6 +302,24 @@ export async function refundPayment(
   return { payment: fresh, refunded: fresh?.status === "REFUNDED" };
 }
 
+/**
+ * Wygasza sesję Stripe Checkout, żeby po anulowaniu rezerwacji nie dało się
+ * już zapłacić. Best-effort: brak klucza, padnięta bramka albo sesja, której
+ * nie da się wygasić (bo właśnie została opłacona), nie mogą wywrócić
+ * anulowania — taką wpłatę wyłapie webhook (markPaymentPaid → zwrot).
+ */
+async function expireStripeCheckoutSession(sessionId: string): Promise<void> {
+  if (!env.STRIPE_SECRET_KEY) return;
+  try {
+    await stripeRequest(`/checkout/sessions/${sessionId}/expire`, {});
+  } catch (error) {
+    console.error(
+      `expireStripeCheckoutSession: nie udało się wygasić sesji ${sessionId}:`,
+      error,
+    );
+  }
+}
+
 export type SettledPayment = {
   paymentId: string;
   provider: string;
@@ -293,32 +345,64 @@ export async function settleBookingPaymentsOnCancellation(
       where: { bookingId, status: { in: ["PENDING", "PAID"] } },
     });
     for (const payment of payments) {
+      const summary = {
+        paymentId: payment.id,
+        provider: payment.provider,
+        kind: payment.kind,
+        amountCents: payment.amountCents,
+        currency: payment.currency,
+      };
+
       if (payment.status === "PAID") {
         const result = await refundPayment(payment.id, options);
         settled.push({
-          paymentId: payment.id,
-          provider: payment.provider,
-          kind: payment.kind,
-          amountCents: payment.amountCents,
-          currency: payment.currency,
+          ...summary,
           previousStatus: "PAID",
           newStatus: result.payment?.status ?? "PAID",
         });
-      } else {
-        await prisma.payment.updateMany({
-          where: { id: payment.id, status: "PENDING" },
-          data: { status: "CANCELLED" },
-        });
+        continue;
+      }
+
+      // Sesja Checkout żyje do 24 h — bez wygaszenia klient z otwartą kartą
+      // Stripe płaci PO anulowaniu, a webhook trafia w strażnik statusu
+      // i pobrane pieniądze nie zostawiają śladu w systemie.
+      if (payment.provider === "STRIPE" && payment.providerPaymentId) {
+        await expireStripeCheckoutSession(payment.providerPaymentId);
+      }
+
+      const cancelled = await prisma.payment.updateMany({
+        where: { id: payment.id, status: "PENDING" },
+        data: { status: "CANCELLED" },
+      });
+      if (cancelled.count > 0) {
         settled.push({
-          paymentId: payment.id,
-          provider: payment.provider,
-          kind: payment.kind,
-          amountCents: payment.amountCents,
-          currency: payment.currency,
+          ...summary,
           previousStatus: "PENDING",
           newStatus: "CANCELLED",
         });
+        continue;
       }
+
+      // Status zmienił się w międzyczasie — jeśli klient zdążył zapłacić
+      // (webhook wyprzedził wygaszenie sesji), należy mu się zwrot, a nie
+      // ciche przestawienie na CANCELLED.
+      const fresh = await prisma.payment.findUnique({
+        where: { id: payment.id },
+      });
+      if (fresh?.status === "PAID") {
+        const result = await refundPayment(payment.id, options);
+        settled.push({
+          ...summary,
+          previousStatus: "PAID",
+          newStatus: result.payment?.status ?? "PAID",
+        });
+        continue;
+      }
+      settled.push({
+        ...summary,
+        previousStatus: "PENDING",
+        newStatus: fresh?.status ?? "PENDING",
+      });
     }
   } catch (error) {
     console.error(

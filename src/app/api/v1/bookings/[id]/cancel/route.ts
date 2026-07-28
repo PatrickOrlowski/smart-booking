@@ -8,8 +8,9 @@ import { cancelBooking } from "@/lib/booking-cancel";
  *
  * Zalogowany użytkownik anuluje swoje rezerwacje; gość potwierdza
  * tożsamość e-mailem podanym przy rezerwacji. Reguły (własność, status,
- * cutoff), strażnik statusu i powiadomienia siedzą w `@/lib/booking-cancel` —
- * dzieli je z akcją z /konto i ze stroną zarządzania rezerwacją gościa.
+ * cutoff), strażnik statusu, rozliczenie zadatku, audyt i powiadomienia
+ * siedzą w `@/lib/booking-cancel` — dzieli je z akcją z /konto i ze stroną
+ * zarządzania rezerwacją gościa.
  */
 
 const cancelSchema = z.object({

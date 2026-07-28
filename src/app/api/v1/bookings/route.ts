@@ -1,8 +1,15 @@
 import { NextResponse, after } from "next/server";
 import { z } from "zod";
 import { auth } from "@/lib/auth";
+import { env } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
 import { consumeHold, resolveSlot, SLOT_TAKEN_MESSAGE } from "@/lib/hold";
+import { createBookingPayment } from "@/lib/payments";
+import {
+  findCustomerByContact,
+  findOrCreateCustomerForBooking,
+  findOrCreateCustomerForUser,
+} from "@/app/panel/(dashboard)/klienci/customer-match";
 import { sendBookingConfirmationEmails } from "./emails";
 
 /**
@@ -152,6 +159,50 @@ export async function POST(request: Request) {
   }
   const { context, slot } = resolution;
 
+  // Kontakt rezerwującego: zalogowany bierze dane z konta, gość z formularza.
+  // Ten sam kontakt decyduje o blokadzie i o dopasowaniu profilu CRM.
+  const sessionUser = sessionUserId
+    ? await prisma.user.findUnique({
+        where: { id: sessionUserId },
+        select: { name: true, email: true, phone: true },
+      })
+    : null;
+  const contact = {
+    name: sessionUser?.name ?? input.guest?.name ?? "Klient",
+    email: sessionUser?.email ?? input.guest?.email ?? null,
+    phone: sessionUser?.phone ?? input.guest?.phone ?? null,
+  };
+
+  // Polityka no-show: zablokowany profil klienta (Customer.isBlocked) nie
+  // rezerwuje online. Sprawdzamy konto ORAZ kontakt — dopasowanie kontaktu
+  // idzie przez ten sam moduł CRM co rezerwacje ręczne (telefon po samych
+  // cyfrach, e-mail bez wielkości liter), więc blokady nie obchodzi ani
+  // format numeru („+48 600 700 800" vs „600700800"), ani inna wielkość
+  // liter w e-mailu, ani założenie konta na dane z wizyty ręcznej.
+  // Komunikat celowo nie zdradza powodu blokady.
+  const [blockedAccount, contactMatch] = await Promise.all([
+    sessionUserId
+      ? prisma.customer.findFirst({
+          where: {
+            businessId: context.business.id,
+            userId: sessionUserId,
+            isBlocked: true,
+          },
+          select: { id: true },
+        })
+      : null,
+    findCustomerByContact(context.business.id, contact),
+  ]);
+  if (blockedAccount || contactMatch?.isBlocked) {
+    return NextResponse.json(
+      {
+        error: "BOOKING_BLOCKED",
+        message: "Rezerwacja online niedostępna. Skontaktuj się z salonem.",
+      },
+      { status: 403 },
+    );
+  }
+
   try {
     const booking = await prisma.$transaction(async (tx) => {
       // Hold i rezerwacja żyją w jednej transakcji: albo termin zostaje
@@ -178,43 +229,41 @@ export async function POST(request: Request) {
         }
       }
 
-      let customerId: string | null = null;
-      let guestData: {
-        guestName: string | null;
-        guestEmail: string | null;
-        guestPhone: string | null;
-      } = { guestName: null, guestEmail: null, guestPhone: null };
+      // Profil CRM dla KAŻDEJ rezerwacji online, także gościa: bez wiersza
+      // Customer registerNoShow pomija rezerwację, więc nieobecności
+      // z marketplace'u (główne źródło no-show) nie liczyłyby się do limitu
+      // firmy i automatyczna blokada nigdy by nie zadziałała. Ten sam moduł
+      // co przy wizytach ręcznych, w tej samej transakcji co rezerwacja —
+      // odrzucony slot nie zostawia osieroconego profilu.
+      const customerId = sessionUserId
+        ? await findOrCreateCustomerForUser(
+            context.business.id,
+            sessionUserId,
+            contact,
+            tx,
+          )
+        : ((
+            await findOrCreateCustomerForBooking(
+              context.business.id,
+              {
+                name: contact.name,
+                phone: contact.phone,
+                email: contact.email,
+              },
+              tx,
+            )
+          )?.id ?? null);
 
-      if (sessionUserId) {
-        const user = await tx.user.findUnique({
-          where: { id: sessionUserId },
-          select: { name: true, email: true, phone: true },
-        });
-        const customer = await tx.customer.upsert({
-          where: {
-            businessId_userId: {
-              businessId: context.business.id,
-              userId: sessionUserId,
-            },
-          },
-          update: {},
-          create: {
-            businessId: context.business.id,
-            userId: sessionUserId,
-            fullName: user?.name ?? input.guest?.name ?? "Klient",
-            email: user?.email ?? input.guest?.email ?? null,
-            phone: user?.phone ?? input.guest?.phone ?? null,
-          },
-          select: { id: true },
-        });
-        customerId = customer.id;
-      } else if (input.guest) {
-        guestData = {
-          guestName: input.guest.name,
-          guestEmail: input.guest.email,
-          guestPhone: input.guest.phone,
-        };
-      }
+      // Dane gościa zostają na rezerwacji (kontakt do wizyty, link
+      // zarządzania z e-maila); profil CRM jest rozstrzygnięty wyżej.
+      const guestData =
+        !sessionUserId && input.guest
+          ? {
+              guestName: input.guest.name,
+              guestEmail: input.guest.email,
+              guestPhone: input.guest.phone,
+            }
+          : { guestName: null, guestEmail: null, guestPhone: null };
 
       return tx.booking.create({
         data: {
@@ -249,6 +298,47 @@ export async function POST(request: Request) {
       });
     });
 
+    // Zadatek: gdy usługa go wymaga, do rezerwacji powstaje Payment
+    // (MANUAL = zapłata na miejscu; Stripe za flagą daje redirectUrl do
+    // Checkout). Best-effort — awaria warstwy płatności nie może cofnąć
+    // już zapisanej rezerwacji, więc łapiemy wszystko i logujemy.
+    let payment: {
+      amountCents: number;
+      currency: string;
+      provider: string;
+      status: string;
+      redirectUrl?: string;
+    } | null = null;
+    try {
+      const deposit = await prisma.service.findUnique({
+        where: { id: context.service.id },
+        select: { depositRequired: true, depositCents: true },
+      });
+      if (deposit?.depositRequired && deposit.depositCents) {
+        const created = await createBookingPayment(
+          booking.id,
+          context.business.id,
+          {
+            kind: "DEPOSIT",
+            amountCents: deposit.depositCents,
+            currency: context.service.currency,
+            description: `Zadatek — ${context.service.name}`,
+            // Powrót z bramki na ekran sukcesu flow rezerwacji.
+            returnUrl: `${env.NEXT_PUBLIC_APP_URL}/b/${context.business.slug}/rezerwacja?serviceId=${context.service.id}&krok=sukces`,
+          },
+        );
+        payment = {
+          amountCents: created.payment.amountCents,
+          currency: created.payment.currency,
+          provider: created.payment.provider,
+          status: created.payment.status,
+          ...(created.redirectUrl ? { redirectUrl: created.redirectUrl } : {}),
+        };
+      }
+    } catch (error) {
+      console.error("Nie udało się utworzyć płatności zadatku:", error);
+    }
+
     // E-maile poza transakcją, best-effort i PO odpowiedzi: wolny albo
     // zawieszony Resend nie może opóźnić 201 (klient dostawał 504, ponawiał
     // i trafiał na 409 od własnej, już zapisanej rezerwacji).
@@ -278,6 +368,8 @@ export async function POST(request: Request) {
           cancellationCutoffHours: context.location.cancellationCutoffHours,
           cancellationDeadline: cancellationDeadline.toISOString(),
         },
+        /** Zadatek do rezerwacji — null, gdy usługa go nie wymaga. */
+        payment,
       },
       { status: 201 },
     );

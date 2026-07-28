@@ -38,6 +38,7 @@ import {
 import {
   addStaffAction,
   addTimeOffAction,
+  deactivateStaffAction,
   deleteTimeOffAction,
   saveScheduleAction,
 } from "@/app/panel/(dashboard)/zespol/actions";
@@ -176,6 +177,31 @@ export function TeamView({
         setTimeOffStart("");
         setTimeOffEnd("");
         setTimeOffReason("");
+        router.refresh();
+      } else {
+        toast.error(result.error);
+      }
+    });
+  };
+
+  // Dezaktywacja pracownika — bez niej firma nad limitem niższego planu
+  // nigdy nie mogła zrobić downgrade'u (komunikat „zmniejsz zespół" wskazywał
+  // akcję, której w produkcie nie było).
+  const deactivateMember = (member: TeamMember) => {
+    if (
+      !window.confirm(
+        `Dezaktywować pracownika ${member.name}? Zniknie z kalendarza i dostępności; historia wizyt zostaje.`,
+      )
+    ) {
+      return;
+    }
+    startTransition(async () => {
+      const result = await deactivateStaffAction({
+        businessId,
+        resourceId: member.resourceId,
+      });
+      if (result.ok) {
+        toast.success(`${member.name} — pracownik dezaktywowany`);
         router.refresh();
       } else {
         toast.error(result.error);
@@ -331,6 +357,17 @@ export function TeamView({
                   >
                     Urlopy
                     {member.timeOff.length > 0 && ` (${member.timeOff.length})`}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isPending}
+                    aria-label={`Dezaktywuj pracownika ${member.name}`}
+                    title="Dezaktywuj pracownika"
+                    className="rounded-full font-semibold max-lg:h-11"
+                    onClick={() => deactivateMember(member)}
+                  >
+                    Dezaktywuj
                   </Button>
                 </div>
               )}

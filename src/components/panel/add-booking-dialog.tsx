@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,7 @@ import {
   weekdayOf,
 } from "@/components/panel/format";
 import { createManualBookingAction } from "@/app/panel/(dashboard)/actions";
+import { matchCustomerAction } from "@/app/panel/(dashboard)/klienci/actions";
 
 export type BookingStaffOption = { id: string; name: string };
 
@@ -87,6 +88,46 @@ export function AddBookingDialog({
   const [customerEmail, setCustomerEmail] = useState("");
   const [note, setNote] = useState("");
 
+  // Deduplikacja gościa: telefon/e-mail sprawdzany na serwerze (debounce) —
+  // przy trafieniu wizyta zostanie dopisana do istniejącego profilu klienta.
+  const [match, setMatch] = useState<{
+    id: string;
+    fullName: string;
+    isBlocked: boolean;
+  } | null>(null);
+  const [matchChecked, setMatchChecked] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const phone = customerPhone.trim();
+    const email = customerEmail.trim();
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      if (!phone && !email) {
+        if (!cancelled) {
+          setMatch(null);
+          setMatchChecked(false);
+        }
+        return;
+      }
+      const result = await matchCustomerAction({
+        businessId,
+        phone: phone || undefined,
+        email: email || undefined,
+      });
+      if (cancelled) return;
+      setMatch(result.ok ? result.match : null);
+      setMatchChecked(result.ok);
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [open, businessId, customerPhone, customerEmail]);
+
+  const hasGuestContact =
+    customerPhone.trim() !== "" || customerEmail.trim() !== "";
+
   const service = services.find((entry) => entry.id === serviceId) ?? null;
   const override =
     service?.overrides.find((entry) => entry.resourceId === resourceId) ?? null;
@@ -132,13 +173,19 @@ export function AddBookingDialog({
         note: note.trim() || undefined,
       });
       if (result.ok) {
-        toast.success("Wizyta dodana do kalendarza");
+        toast.success(
+          match
+            ? `Wizyta dodana — dopisana do klienta ${match.fullName}`
+            : "Wizyta dodana do kalendarza",
+        );
         setOpen(false);
         setCustomerName("");
         setCustomerPhone("");
         setCustomerEmail("");
         setNote("");
         setStartMinute(null);
+        setMatch(null);
+        setMatchChecked(false);
         router.refresh();
       } else {
         toast.error(result.error);
@@ -275,6 +322,24 @@ export function AddBookingDialog({
               />
             </div>
           </div>
+
+          {hasGuestContact && matchChecked && match ? (
+            <div className="rounded-lg border border-success-soft-border bg-success-soft px-3 py-2.5 text-xs leading-relaxed text-primary dark:border-border dark:bg-muted dark:text-foreground">
+              Znaleziono istniejącego klienta:{" "}
+              <b>{match.fullName}</b> — wizyta zostanie dopisana do jego
+              historii.
+              {match.isBlocked ? (
+                <span className="mt-1 block font-semibold text-destructive">
+                  Uwaga: ten klient jest zablokowany dla rezerwacji online.
+                </span>
+              ) : null}
+            </div>
+          ) : hasGuestContact && matchChecked ? (
+            <p className="text-[11px] text-muted-foreground">
+              Brak dopasowania po telefonie/e-mailu — przy zapisie powstanie
+              nowy profil klienta.
+            </p>
+          ) : null}
 
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="booking-note">Notatka wewnętrzna (opcjonalnie)</Label>

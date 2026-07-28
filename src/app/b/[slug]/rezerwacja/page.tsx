@@ -1,5 +1,7 @@
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
+import { env } from "@/lib/env";
+import { prisma } from "@/lib/prisma";
 import { loadServiceContext } from "@/lib/availability-data";
 import { SiteHeader } from "@/components/marketplace/site-header";
 import { BookingFlow, type BookingFlowData } from "./booking-flow";
@@ -27,6 +29,21 @@ export default async function BookingPage({
   if (!context || context.service.priceType === "ON_REQUEST") {
     redirect(`/b/${slug}`);
   }
+
+  // Zadatek usługi — kontekst dostępności go nie niesie, więc dociągamy
+  // wprost z bazy. `stripeEnabled` mówi flow, czy zadatek będzie płatny
+  // online (Stripe za flagą env), czy na miejscu (MANUAL).
+  const depositFields = await prisma.service.findUnique({
+    where: { id: context.service.id },
+    select: { depositRequired: true, depositCents: true },
+  });
+  const deposit =
+    depositFields?.depositRequired && depositFields.depositCents
+      ? {
+          amountCents: depositFields.depositCents,
+          stripeEnabled: Boolean(env.STRIPE_SECRET_KEY),
+        }
+      : null;
 
   // Auth defensywnie — logowanie buduje inny agent; flow gościa ma działać
   // także bez skonfigurowanej sesji.
@@ -59,6 +76,7 @@ export default async function BookingPage({
       priceType: context.service.priceType,
       currency: context.service.currency,
     },
+    deposit,
     resources: context.resources,
     user,
   };

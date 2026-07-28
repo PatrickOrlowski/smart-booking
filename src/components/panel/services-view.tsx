@@ -168,6 +168,8 @@ export function ServicesView({
     bufferAfterMin: "0",
     priceZl: "",
     priceType: "FIXED",
+    depositEnabled: false,
+    depositZl: "",
     onlineBookable: true,
     hasBookings: false,
     assignments: Object.fromEntries(
@@ -189,6 +191,8 @@ export function ServicesView({
         ? String(service.priceCents / 100)
         : (service.priceCents / 100).toFixed(2),
     priceType: service.priceType,
+    depositEnabled: service.depositRequired && service.depositCents != null,
+    depositZl: centsToZlInput(service.depositCents),
     onlineBookable: service.onlineBookable,
     hasBookings: service.hasBookings,
     assignments: Object.fromEntries(
@@ -256,6 +260,23 @@ export function ServicesView({
       return;
     }
 
+    // Zadatek: kwota > 0 i nieprzekraczająca ceny usługi; wymaga cennika
+    // z konkretną kwotą (przy „bezpłatna"/„na zapytanie" nie ma od czego
+    // liczyć zadatku). Wyłączony przełącznik zawsze czyści kwotę.
+    const priceCents = priceFree ? 0 : Math.round(priceZl * 100);
+    const depositZl = Number(editor.depositZl.replace(",", "."));
+    const depositCents = editor.depositEnabled ? Math.round(depositZl * 100) : null;
+    if (editor.depositEnabled) {
+      if (!Number.isFinite(depositZl) || (depositCents ?? 0) <= 0) {
+        toast.error("Podaj kwotę zadatku większą od zera");
+        return;
+      }
+      if (priceCents <= 0 || (depositCents ?? 0) > priceCents) {
+        toast.error("Zadatek nie może przekraczać ceny usługi");
+        return;
+      }
+    }
+
     startTransition(async () => {
       const result = await saveServiceAction({
         businessId,
@@ -273,8 +294,10 @@ export function ServicesView({
         durationMin,
         bufferBeforeMin: Number.isFinite(bufferBeforeMin) ? bufferBeforeMin : 0,
         bufferAfterMin: Number.isFinite(bufferAfterMin) ? bufferAfterMin : 0,
-        priceCents: priceFree ? 0 : Math.round(priceZl * 100),
+        priceCents,
         priceType: editor.priceType,
+        depositRequired: editor.depositEnabled,
+        depositCents,
         onlineBookable: editor.onlineBookable,
         assignments: Object.entries(editor.assignments)
           .filter(([, value]) => value.checked)
@@ -705,6 +728,57 @@ export function ServicesView({
                     }
                   />
                 </label>
+
+                <div className="rounded-xl border border-border bg-card px-3.5 py-2.5">
+                  <label className="flex items-center justify-between gap-3">
+                    <span className="min-w-0">
+                      <span className="block text-[13px] font-semibold">
+                        Zadatek online
+                      </span>
+                      <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
+                        Klient widzi kwotę przy rezerwacji; przy odwołaniu w
+                        terminie zadatek wraca.
+                      </span>
+                    </span>
+                    <Switch
+                      checked={editor.depositEnabled}
+                      onCheckedChange={(checked) =>
+                        setEditor({
+                          ...editor,
+                          depositEnabled: checked === true,
+                          // Wyłączenie czyści kwotę — zapis wyśle null.
+                          depositZl: checked === true ? editor.depositZl : "",
+                        })
+                      }
+                    />
+                  </label>
+                  {editor.depositEnabled && (
+                    <div className="mt-2.5 flex flex-col gap-1.5">
+                      <Label htmlFor="service-deposit">Kwota zadatku</Label>
+                      <div className="relative">
+                        <Input
+                          id="service-deposit"
+                          className="pr-9 font-mono"
+                          inputMode="decimal"
+                          value={editor.depositZl}
+                          onChange={(event) =>
+                            setEditor({
+                              ...editor,
+                              depositZl: event.target.value,
+                            })
+                          }
+                          placeholder="np. 50"
+                        />
+                        <span className="absolute top-1/2 right-3 -translate-y-1/2 font-mono text-xs text-muted-foreground">
+                          zł
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        Więcej niż 0 zł i nie więcej niż cena usługi.
+                      </p>
+                    </div>
+                  )}
+                </div>
 
                 <div className="flex flex-col gap-1.5">
                   <Label>Kto wykonuje · nadpisanie czasu</Label>

@@ -8,7 +8,7 @@ import {
   requireBusinessManager,
 } from "@/lib/authz";
 import { SubscriptionPlan } from "@/generated/prisma/enums";
-import { PlanLimitError, changePlan } from "@/lib/subscription";
+import { PlanChangeError, PlanLimitError, changePlan } from "@/lib/subscription";
 
 type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -36,7 +36,8 @@ export async function changePlanAction(input: unknown): Promise<ActionResult> {
     if (
       error instanceof UnauthorizedError ||
       error instanceof ForbiddenError ||
-      error instanceof PlanLimitError
+      error instanceof PlanLimitError ||
+      error instanceof PlanChangeError
     ) {
       return { ok: false, error: error.message };
     }

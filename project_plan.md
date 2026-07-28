@@ -254,17 +254,65 @@ Responsywność 390–1440 wszędzie. Testy: 55 zielonych.
 ~32 opinie na prawdziwych wizytach, historia CRM, subskrypcje FREE/PRO/TEAM, zadatki
 na usługach premium.
 
-**Faza 4 — W TOKU (workflow):** zadatki w checkoucie (MANUAL + Stripe za flagą, webhook
-HMAC), polityka no-show (blokada klienta po limicie), subskrypcje z limitami planów,
-CRM `/panel/klienci`, statystyki + eksport CSV, dziennik `AuditLog`.
-Schemat bazy pod fazę już zmigrowany (`payments_subscriptions_audit`).
+**Faza 4 — ZROBIONA (28.07.2026).** Zadatki per usługa (MANUAL = płatność na miejscu,
+Stripe za flagą env: Checkout + webhook z ręcznym HMAC), polityka no-show z blokadą
+klienta, subskrypcje FREE/PRO/TEAM z egzekwowanymi limitami, CRM `/panel/klienci`,
+statystyki z eksportem CSV, dziennik `/panel/aktywnosc` na `AuditLog`.
 
-## 5b. Kolejne kroki po Fazie 4
+Weryfikacja adwersaryjna: **25 findingów, 17 do naprawy — wszystkie naprawione.**
+Najważniejsze, żadne niewykrywalne testami:
+- zadatek nie był rozliczany przy anulowaniu z `/konto` i ze strony gościa (rozliczenie
+  siedziało tylko w API route) → przeniesione do wspólnego `cancelBooking()`
+- blokadę klienta dało się obejść formatem kontaktu („600700800" zamiast „+48 600 700 800",
+  e-mail inną wielkością liter) → guard używa normalizacji z modułu CRM; przy okazji
+  poprawiono samo `normalizePhone`, które i tak nie zrównywało tych zapisów
+- no-show z marketplace nie liczył się w ogóle (goście nie dostawali wiersza `Customer`)
+  → ścieżka gościa tworzy profil CRM w tej samej transakcji co rezerwacja
+- anulowanie nie wygaszało sesji Stripe (klient mógł zapłacić po anulowaniu, a webhook
+  odbijał się od strażnika statusu) → `expire` sesji + wpłata po anulowaniu wyzwala zwrot
+  i wpis `PAYMENT_PAID_AFTER_CANCELLATION`
+- CSV injection w eksporcie; statystyki i eksport danych klientów były dostępne dla
+  szeregowego pracownika → `requireBusinessManager`
+- TOCTOU na limitach planów → `pg_advisory_xact_lock` per firma; plan efektywny
+  (wygasły trial / CANCELLED / po okresie → FREE) zamiast ufania samemu polu `plan`
 
-1. Deploy na Vercel (env: DATABASE_URL, DIRECT_URL, AUTH_SECRET, CRON_SECRET;
-   build ma już `prisma generate`, migracje: `npx prisma migrate deploy` w predeploy).
-2. Faza 5: aplikacja mobilna klienta (Expo na API /api/v1).
-3. Reszta Fazy 3: wyszukiwanie geo po odległości, przypomnienia SMS/push.
+Testy: 59 zielonych (4 nowe integracyjne dla dopasowania klientów).
+
+**Faza 5 (mobile) — ZROBIONA (28.07.2026).** Aplikacja Expo/React Native w `mobile/`
+(SDK 57, expo-router), design 1:1 z web przez `mobile/src/theme/tokens.ts`
+(te same hexy i fonty co `design/DESIGN.md`). Zakres:
+- tab **Szukaj**: lista firm wg ekranu s1, wyszukiwarka z debounce, karta promowana,
+  pull-to-refresh, pusty stan
+- **profil firmy** wg s2: galeria, zakładki Usługi/Opinie/Info, cennik po kategoriach,
+  telefon i nawigacja przez `Linking`
+- **flow rezerwacji** s3–s7: wybór pracownika, pasek 14 dni + siatka slotów z podziałem
+  Rano/Po południu/Wieczorem, sonda kolejnych 7 dni przy pustym dniu, hold z licznikiem
+  mm:ss (TTL kotwiczony do odbioru odpowiedzi, nie do zegara urządzenia), 409 → dane
+  gościa zachowane, ekran sukcesu z kartą zadatku i „Opłać zadatek"
+- tab **Moje wizyty**: AsyncStorage (`planner.visits`, walidacja uszkodzonego JSON),
+  bilet wizyty, odświeżanie statusu, odwołanie z obsługą cutoffu
+- backend: **jeden nowy** `GET /api/v1/bookings/[id]` — dla rezerwacji z konta wymaga
+  sesji właściciela, e-mail honorowany wyłącznie dla gości; 403 również dla nieistniejącego
+  id (brak wyroczni istnienia)
+
+Weryfikacja: 8 findingów z adwersaryjnej recenzji, wszystkie naprawione (m.in. e-mail konta
+jako poświadczenie w GET, zadatek gubiony po stronie mobile, czasy formatowane w strefie
+lokalizacji zamiast urządzenia). Typecheck web i mobile czyste.
+
+> **DECYZJA 28.07.2026 — natywny mobile wstrzymany.** Katalog `mobile/` zostaje w repo
+> w stanie ukończonym, ale nie jest dalej rozwijany. Doświadczenie mobilne realizujemy
+> wyłącznie przez responsywny widok aplikacji webowej (i tak każdy widok powstaje od razu
+> na 390/768/1024/1440 — patrz `design/DESIGN.md`, sekcja Responsywność).
+> Zmiany w `/api/v1` nie muszą być kompatybilne wstecz z `mobile/`.
+
+## 5b. Kolejne kroki
+
+1. Deploy na Vercel (env: DATABASE_URL, DIRECT_URL, AUTH_SECRET, CRON_SECRET, opcjonalnie
+   RESEND_API_KEY i STRIPE_*; build ma już `prisma generate`, migracje:
+   `npx prisma migrate deploy` w predeploy).
+2. Reszta Fazy 3: wyszukiwanie geo po odległości, przypomnienia SMS/push.
+3. Faza 6: wniosek urlopowy pracownika (reszta panelu gotowa).
+4. Faza 7: restauracje — stoliki, plan sali, `partySize`, turn time, pacing, waitlist.
 
 ---
 

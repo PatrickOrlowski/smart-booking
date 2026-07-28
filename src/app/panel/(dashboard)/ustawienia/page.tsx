@@ -5,16 +5,18 @@ import {
   WEEKDAY_LABELS,
   formatMinutes,
 } from "@/components/panel/format";
+import { NoShowLimitForm } from "./no-show-limit-form";
 
 /**
- * Ustawienia — podgląd konfiguracji firmy (read-only w fazie 1).
- * Edycja danych firmy i lokalizacji przyjdzie z kolejną fazą.
+ * Ustawienia — podgląd konfiguracji firmy. Edytowalna jest na razie tylko
+ * polityka nieobecności (Business.noShowLimit); edycja danych firmy
+ * i lokalizacji przyjdzie z kolejną fazą.
  */
 export default async function SettingsPage() {
   const panel = await getPanelBusiness();
   if (!panel) redirect("/panel/nowa");
 
-  const { business, location } = panel;
+  const { business, location, isManager } = panel;
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6">
@@ -22,7 +24,8 @@ export default async function SettingsPage() {
         Ustawienia
       </h1>
       <p className="mt-0.5 mb-6 text-[12.5px] text-muted-foreground">
-        Podgląd konfiguracji — edycja danych firmy pojawi się w kolejnej fazie.
+        Podgląd konfiguracji i polityka nieobecności — edycja pozostałych
+        danych firmy pojawi się w kolejnej fazie.
       </p>
 
       <div className="flex flex-col gap-4">
@@ -38,6 +41,27 @@ export default async function SettingsPage() {
             <dt className="text-muted-foreground">Status</dt>
             <dd className="font-mono text-xs">{business.status}</dd>
           </dl>
+        </section>
+
+        <section className="rounded-2xl border border-border bg-card p-5">
+          <div className="meta-label mb-3">Polityka nieobecności</div>
+          {isManager ? (
+            <NoShowLimitForm
+              businessId={business.id}
+              initialLimit={business.noShowLimit}
+            />
+          ) : (
+            <dl className="grid grid-cols-1 gap-y-1 text-[13px] md:grid-cols-[140px_1fr] md:gap-y-2">
+              <dt className="text-muted-foreground">Limit nieobecności</dt>
+              <dd className="font-semibold">
+                {business.noShowLimit}{" "}
+                {business.noShowLimit === 1 ? "nieobecność" : "nieobecności"}
+                <span className="ml-2 font-normal text-muted-foreground">
+                  — potem automatyczna blokada rezerwacji online
+                </span>
+              </dd>
+            </dl>
+          )}
         </section>
 
         {location && (

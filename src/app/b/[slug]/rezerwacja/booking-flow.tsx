@@ -38,6 +38,8 @@ export type BookingFlowData = {
     priceType: string;
     currency: string;
   };
+  /** Zadatek wymagany przy rezerwacji — null, gdy usługa go nie ma. */
+  deposit: { amountCents: number; stripeEnabled: boolean } | null;
   resources: {
     id: string;
     name: string;
@@ -75,6 +77,16 @@ type BookingResult = {
   timezone: string;
   cancellationCutoffHours: number;
   cancellationDeadline: string;
+};
+
+/** Płatność zadatku z odpowiedzi POST /bookings — null, gdy bez zadatku. */
+type BookingPayment = {
+  amountCents: number;
+  currency: string;
+  provider: string;
+  status: string;
+  /** Link do Stripe Checkout — tylko gdy bramka aktywna. */
+  redirectUrl?: string;
 };
 
 const pad = (value: number) => String(value).padStart(2, "0");
@@ -361,8 +373,17 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
   const dateParam = searchParams.get("date");
   const timeParam = searchParams.get("time");
   const krokParam = searchParams.get("krok");
+  // Powrót ze Stripe Checkout (success_url/cancel_url z lib/payments.ts) to
+  // pełne przeładowanie strony — stan `booking`/`payment` w pamięci przepada,
+  // więc status zadatku musimy odczytać z adresu.
+  const zadatekParam = searchParams.get("zadatek");
+  const depositReturn: "oplacony" | "anulowany" | null =
+    zadatekParam === "oplacony" || zadatekParam === "anulowany"
+      ? zadatekParam
+      : null;
 
   const [booking, setBooking] = useState<BookingResult | null>(null);
+  const [payment, setPayment] = useState<BookingPayment | null>(null);
 
   // Dane gościa trzymamy na poziomie flow: komunikat konfliktu obiecuje
   // „Twoje dane zostają", a powrót do listy terminów odmontowuje krok „dane".
@@ -458,7 +479,12 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
       {krokParam === "sukces" ? (
         booking ? (
           <div className="mx-auto w-full max-w-md">
-            <SuccessScreen booking={booking} slug={data.businessSlug} />
+            <SuccessScreen
+              booking={booking}
+              payment={payment}
+              slug={data.businessSlug}
+              depositReturn={depositReturn}
+            />
           </div>
         ) : (
           <div className="mx-auto max-w-md py-16 text-center">
@@ -466,7 +492,11 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
               Rezerwacja potwierdzona
             </h1>
             <p className="mb-6 text-[13px] text-muted-foreground">
-              Szczegóły wizyty znajdziesz w e-mailu z potwierdzeniem.
+              {depositReturn === "oplacony"
+                ? "Zadatek opłacony — dziękujemy. Szczegóły wizyty znajdziesz w e-mailu z potwierdzeniem."
+                : depositReturn === "anulowany"
+                  ? "Płatność zadatku została przerwana — sama wizyta jest zarezerwowana. Link do zapłaty znajdziesz w e-mailu z potwierdzeniem; zadatek możesz też uregulować na miejscu."
+                  : "Szczegóły wizyty znajdziesz w e-mailu z potwierdzeniem."}
             </p>
             <Link
               href={`/b/${data.businessSlug}`}
@@ -529,8 +559,9 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
                   void hold.release().finally(() => router.back());
                 }}
                 onConflictRetry={backToSlots}
-                onSuccess={(result) => {
+                onSuccess={(result, resultPayment) => {
                   setBooking(result);
+                  setPayment(resultPayment);
                   setParams({ krok: "sukces", time: null });
                 }}
               />
@@ -549,6 +580,8 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
                 : null
             }
             priceLabelText={effectivePriceLabel}
+            deposit={data.deposit}
+            currency={data.service.currency}
           />
         </div>
       )}
@@ -568,6 +601,8 @@ function BookingSummary({
   staffLabel,
   termLabel,
   priceLabelText,
+  deposit,
+  currency,
 }: {
   businessName: string;
   address: string;
@@ -576,6 +611,8 @@ function BookingSummary({
   staffLabel: string | null;
   termLabel: string | null;
   priceLabelText: string;
+  deposit: BookingFlowData["deposit"];
+  currency: string;
 }) {
   return (
     <aside className="hidden lg:sticky lg:top-8 lg:block">
@@ -621,6 +658,20 @@ function BookingSummary({
             {priceLabelText}
           </span>
         </div>
+
+        {deposit ? (
+          <div className="mt-2 flex items-baseline justify-between gap-3">
+            <span className="text-[13px] text-muted-foreground">
+              Zadatek
+              <span className="block text-[11px] text-[#8f8b81]">
+                {deposit.stripeEnabled ? "płatny online" : "płatny na miejscu"}
+              </span>
+            </span>
+            <span className="font-mono text-[13px] font-medium">
+              {formatPrice(deposit.amountCents, currency)}
+            </span>
+          </div>
+        ) : null}
       </div>
     </aside>
   );
@@ -1068,7 +1119,7 @@ function DetailsStep({
   onGuestChange: (patch: Partial<GuestDetails>) => void;
   onBack: () => void;
   onConflictRetry: () => void;
-  onSuccess: (booking: BookingResult) => void;
+  onSuccess: (booking: BookingResult, payment: BookingPayment | null) => void;
 }) {
   const { name, phone, email } = guest;
   const setName = (value: string) => onGuestChange({ name: value });
@@ -1122,11 +1173,12 @@ function DetailsStep({
       });
       const json = (await response.json().catch(() => null)) as {
         booking?: BookingResult;
+        payment?: BookingPayment | null;
         message?: string;
       } | null;
 
       if (response.status === 201 && json?.booking) {
-        onSuccess(json.booking);
+        onSuccess(json.booking, json.payment ?? null);
         return;
       }
       if (response.status === 409) {
@@ -1250,6 +1302,24 @@ function DetailsStep({
             {formatDuration(durationMin)}
           </span>
         </div>
+        {data.deposit ? (
+          <>
+            <div className="my-[11px] h-px bg-[#e2ddd2] dark:bg-border" />
+            <div className="flex justify-between text-[13px] text-foreground/80">
+              <span>
+                Zadatek
+                <span className="ml-1.5 text-[11px] text-[#8f8b81]">
+                  {data.deposit.stripeEnabled
+                    ? "płatny online"
+                    : "płatny na miejscu"}
+                </span>
+              </span>
+              <span className="font-mono font-medium text-foreground">
+                {formatPrice(data.deposit.amountCents, data.service.currency)}
+              </span>
+            </div>
+          </>
+        ) : null}
       </div>
 
       {isGuest ? (
@@ -1353,7 +1423,11 @@ function DetailsStep({
           : `Potwierdzam rezerwację · ${priceLabelText}`}
       </button>
       <p className="mt-2 text-center text-[11px] text-[#8f8b81]">
-        Płatność w lokalu. Zadatku nie wymagamy.
+        {data.deposit
+          ? data.deposit.stripeEnabled
+            ? `Zadatek ${formatPrice(data.deposit.amountCents, data.service.currency)} zapłacisz online po potwierdzeniu. Reszta w lokalu.`
+            : `Zadatek ${formatPrice(data.deposit.amountCents, data.service.currency)} płatny na miejscu. Reszta w lokalu.`
+          : "Płatność w lokalu. Zadatku nie wymagamy."}
       </p>
     </div>
   );
@@ -1365,13 +1439,22 @@ function DetailsStep({
 
 function SuccessScreen({
   booking,
+  payment,
   slug,
+  depositReturn,
 }: {
   booking: BookingResult;
+  payment: BookingPayment | null;
   slug: string;
+  /** Status powrotu z bramki (searchParam `zadatek`), gdy klient stąd wracał. */
+  depositReturn: "oplacony" | "anulowany" | null;
 }) {
   const startAt = new Date(booking.startAt);
   const deadline = new Date(booking.cancellationDeadline);
+  // Powrót z bramki jest świeższy niż status zapisany przy tworzeniu
+  // płatności (PENDING w chwili wystawienia linku do Checkoutu).
+  const depositPaid = payment?.status === "PAID" || depositReturn === "oplacony";
+  const depositAborted = !depositPaid && depositReturn === "anulowany";
 
   return (
     <div className="pt-7">
@@ -1414,6 +1497,36 @@ function SuccessScreen({
             {formatPrice(booking.priceCents, booking.currency)}
           </div>
         </div>
+        {payment ? (
+          <div className="border-t border-dashed border-[#d8d2c4] px-4 py-3 dark:border-border">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="meta-label">Zadatek</div>
+                <div className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
+                  {depositPaid
+                    ? "opłacony — dziękujemy"
+                    : depositAborted
+                      ? "płatność przerwana — możesz spróbować ponownie"
+                      : payment.redirectUrl
+                        ? "do zapłaty online — dokończ płatność"
+                        : "do zapłaty na miejscu, przy wizycie"}
+                </div>
+              </div>
+              <div className="flex-none font-mono text-base font-medium">
+                {formatPrice(payment.amountCents, payment.currency)}
+              </div>
+            </div>
+            {!depositPaid && payment.redirectUrl ? (
+              <a
+                href={payment.redirectUrl}
+                className="mt-3 block w-full rounded-xl bg-primary py-3 text-center text-[13px] font-bold text-primary-foreground"
+              >
+                {depositAborted ? "Ponów płatność zadatku · " : "Zapłać zadatek · "}
+                {formatPrice(payment.amountCents, payment.currency)}
+              </a>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="mt-4 flex gap-2">

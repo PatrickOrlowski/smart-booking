@@ -1,5 +1,7 @@
 import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
+import { settleBookingPaymentsOnCancellation } from "@/lib/payments";
 import { sendBookingCancellationEmails } from "@/app/api/v1/bookings/emails";
 
 /**
@@ -55,6 +57,7 @@ export async function cancelBooking(input: {
     where: { id: input.bookingId },
     select: {
       id: true,
+      businessId: true,
       status: true,
       startAt: true,
       customerUserId: true,
@@ -116,6 +119,29 @@ export async function cancelBooking(input: {
   if (updated.count === 0) {
     return fail("INVALID_STATE", "Tej wizyty nie można już anulować.", 422);
   }
+
+  // Rozliczenie zadatku i wpis audytu TUTAJ, nie w poszczególnych wejściach
+  // (API route / akcja z /konto / strona gościa) — każda ścieżka anulowania
+  // musi zwrócić opłacony zadatek (PAID → zwrot), zamknąć wiszący PENDING
+  // i zostawić ślad BOOKING_CANCELLED. Oba wywołania są best-effort i nie
+  // mogą unieważnić już wykonanego anulowania.
+  const actorUserId = input.actor.kind === "user" ? input.actor.userId : null;
+  const settledPayments = await settleBookingPaymentsOnCancellation(
+    booking.id,
+    { actorUserId, reason: input.reason ?? null },
+  );
+  await logAudit({
+    businessId: booking.businessId,
+    actorUserId,
+    action: "BOOKING_CANCELLED",
+    entityType: "Booking",
+    entityId: booking.id,
+    metadata: {
+      cancelledBy: input.actor.kind,
+      reason: input.reason ?? null,
+      payments: settledPayments,
+    },
+  });
 
   // Powiadomienia best-effort i po odpowiedzi — poczta nie może opóźniać ani
   // wywracać anulowania (sendBookingCancellationEmails sam też nie rzuca).

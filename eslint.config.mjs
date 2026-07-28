@@ -15,6 +15,9 @@ const eslintConfig = defineConfig([
     // Równoległe dist diry agentów (NEXT_DIST_DIR) i wygenerowany klient Prismy:
     ".next-*/**",
     "src/generated/**",
+    // mobile/ to osobny projekt Expo z własnym lintem (`npm run lint` w mobile/) —
+    // reguły Next.js nie mają tam zastosowania.
+    "mobile/**",
   ]),
 ]);
 

@@ -5,12 +5,15 @@ import { after } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { sendBookingConfirmationEmails } from "@/app/api/v1/bookings/emails";
+import { logAudit } from "@/lib/audit";
+import { registerNoShow } from "@/lib/no-show";
 import {
   ForbiddenError,
   UnauthorizedError,
   requireBusinessManager,
 } from "@/lib/authz";
 import { addMinutes, localDayMinutesToUtc } from "@/lib/time";
+import { findOrCreateCustomerForBooking } from "@/app/panel/(dashboard)/klienci/customer-match";
 
 type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -119,11 +122,21 @@ export async function createManualBookingAction(
     const blockedStartAt = addMinutes(startAt, -service.bufferBeforeMin);
     const blockedEndAt = addMinutes(endAt, service.bufferAfterMin);
 
+    // CRM: gość z telefonem/e-mailem jest dopasowywany do istniejącego
+    // profilu klienta firmy (albo dostaje nowy) — dzięki temu ręczne wizyty
+    // liczą się do historii, wydatków i polityki no-show.
+    const customer = await findOrCreateCustomerForBooking(data.businessId, {
+      name: data.customerName,
+      phone: data.customerPhone || null,
+      email: data.customerEmail || null,
+    });
+
     const booking = await prisma.booking.create({
       select: { id: true },
       data: {
         businessId: data.businessId,
         locationId: resource.location.id,
+        customerId: customer?.id ?? null,
         guestName: data.customerName,
         guestPhone: data.customerPhone || null,
         guestEmail: data.customerEmail || null,
@@ -166,6 +179,95 @@ export async function createManualBookingAction(
     }
     console.error("createManualBookingAction", error);
     return { ok: false, error: "Nie udało się dodać wizyty. Spróbuj ponownie." };
+  }
+
+  revalidatePath("/panel");
+  return { ok: true };
+}
+
+const setStatusSchema = z.object({
+  businessId: z.string().min(1),
+  bookingId: z.string().min(1),
+  status: z.enum(["COMPLETED", "NO_SHOW"]),
+});
+
+/**
+ * Zmiana statusu wizyty z panelu firmy: zakończona albo nieobecność.
+ *
+ * Te same reguły co w panelu pracownika — tylko wizyty rozpoczęte
+ * (przeszłe/trwające) w statusie PENDING/CONFIRMED. Oznaczenie NO_SHOW
+ * uruchamia politykę no-show: wpis BOOKING_NO_SHOW w audycie i licznik
+ * nieobecności klienta z automatyczną blokadą po limicie firmy.
+ */
+export async function setBookingStatusAction(
+  input: unknown,
+): Promise<ActionResult> {
+  const parsed = setStatusSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: "Nieprawidłowe dane wizyty" };
+  }
+  const data = parsed.data;
+
+  try {
+    const { user } = await requireBusinessManager(data.businessId);
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: data.bookingId, businessId: data.businessId },
+      select: { id: true, status: true, startAt: true },
+    });
+    if (!booking) return { ok: false, error: "Nie znaleziono wizyty" };
+
+    const isActionable =
+      (booking.status === "PENDING" || booking.status === "CONFIRMED") &&
+      booking.startAt.getTime() <= Date.now();
+    if (!isActionable) {
+      return {
+        ok: false,
+        error: "Można rozliczyć tylko rozpoczętą, niezakończoną wizytę",
+      };
+    }
+
+    // Strażnik statusu w samym UPDATE: równoległe anulowanie przez klienta
+    // (booking-cancel.ts — już z rozliczonym/zwróconym zadatkiem) nie może
+    // zostać nadpisane na NO_SHOW/COMPLETED przez read-modify-write.
+    const updated = await prisma.booking.updateMany({
+      where: {
+        id: booking.id,
+        businessId: data.businessId,
+        status: { in: ["PENDING", "CONFIRMED"] },
+      },
+      data: { status: data.status },
+    });
+    if (updated.count === 0) {
+      return {
+        ok: false,
+        error: "Status wizyty zmienił się w międzyczasie. Odśwież widok.",
+      };
+    }
+
+    if (data.status === "NO_SHOW") {
+      const result = await registerNoShow(booking.id, {
+        actorUserId: user.id,
+      });
+      await logAudit({
+        businessId: data.businessId,
+        actorUserId: user.id,
+        action: "BOOKING_NO_SHOW",
+        entityType: "Booking",
+        entityId: booking.id,
+        metadata: {
+          noShowCount: result.count,
+          limit: result.limit,
+          customerBlocked: result.blocked,
+        },
+      });
+    }
+  } catch (error) {
+    if (error instanceof UnauthorizedError || error instanceof ForbiddenError) {
+      return { ok: false, error: error.message };
+    }
+    console.error("setBookingStatusAction", error);
+    return { ok: false, error: "Nie udało się zmienić statusu wizyty" };
   }
 
   revalidatePath("/panel");

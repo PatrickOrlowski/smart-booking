@@ -3,6 +3,8 @@
 import { revalidatePath } from "next/cache";
 
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
+import { registerNoShow } from "@/lib/no-show";
 import { ForbiddenError, requireUser } from "@/lib/authz";
 
 /**
@@ -36,7 +38,7 @@ async function setBookingStatus(
         },
       },
     },
-    select: { id: true, status: true, startAt: true },
+    select: { id: true, status: true, startAt: true, businessId: true },
   });
   if (!booking) {
     throw new ForbiddenError();
@@ -50,10 +52,36 @@ async function setBookingStatus(
     return;
   }
 
-  await prisma.booking.update({
-    where: { id: booking.id },
+  // Strażnik statusu w samym UPDATE: równoległe anulowanie przez klienta
+  // (booking-cancel.ts — już ze zwróconym zadatkiem) nie może zostać
+  // nadpisane na NO_SHOW/COMPLETED przez read-modify-write.
+  const updated = await prisma.booking.updateMany({
+    where: { id: booking.id, status: { in: ["PENDING", "CONFIRMED"] } },
     data: { status },
   });
+  if (updated.count === 0) {
+    // Wizytę rozliczył ktoś inny (albo klient ją odwołał) — nic do zrobienia.
+    revalidatePath("/pracownik");
+    return;
+  }
+
+  if (status === "NO_SHOW") {
+    // Polityka no-show: ślad w audycie + licznik nieobecności klienta
+    // (z automatyczną blokadą po przekroczeniu limitu firmy).
+    const result = await registerNoShow(booking.id, { actorUserId: user.id });
+    await logAudit({
+      businessId: booking.businessId,
+      actorUserId: user.id,
+      action: "BOOKING_NO_SHOW",
+      entityType: "Booking",
+      entityId: booking.id,
+      metadata: {
+        noShowCount: result.count,
+        limit: result.limit,
+        customerBlocked: result.blocked,
+      },
+    });
+  }
 
   revalidatePath("/pracownik");
 }

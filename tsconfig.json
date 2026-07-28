@@ -32,27 +32,16 @@
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
+    "**/*.mts",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
-    "**/*.mts",
-    ".next-m/types/**/*.ts",
-    ".next-m/dev/types/**/*.ts",
-    ".next-k/types/**/*.ts",
-    ".next-k/dev/types/**/*.ts",
-    ".next-s/types/**/*.ts",
-    ".next-s/dev/types/**/*.ts",
-    ".next-p/types/**/*.ts",
-    ".next-p/dev/types/**/*.ts",
-    ".next-b/types/**/*.ts",
-    ".next-b/dev/types/**/*.ts",
-    ".next-review-konto/types/**/*.ts",
-    ".next-review-konto/dev/types/**/*.ts",
-    ".next-s-build/types/**/*.ts",
-    ".next-s-build/dev/types/**/*.ts",
-    ".next-verify/types/**/*.ts",
-    ".next-verify/dev/types/**/*.ts"
+    // Typy tras z alternatywnych dist dirów (NEXT_DIST_DIR) — patrz next.config.ts.
+    ".next-*/types/**/*.ts",
+    ".next-*/dev/types/**/*.ts"
   ],
+  // mobile/ to osobny projekt Expo z własnym tsconfigiem.
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "mobile"
   ]
 }

@@ -604,7 +604,7 @@ async function main() {
   const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10);
 
   console.log("→ czyszczenie danych demo");
-  const slugs = BUSINESSES.map((b) => b.slug);
+  const slugs = [...BUSINESSES.map((b) => b.slug), ...RESTAURANTS.map((r) => r.slug)];
   const existing = await prisma.business.findMany({
     where: { slug: { in: slugs } },
     select: { id: true },
@@ -959,18 +959,544 @@ async function main() {
     });
   }
 
+  await seedRestaurants(clientUsers, passwordHash);
+
   const counts = {
     businesses: await prisma.business.count(),
     services: await prisma.service.count(),
     resources: await prisma.resource.count(),
     bookings: await prisma.booking.count(),
     reviews: await prisma.review.count(),
+    tables: await prisma.resource.count({ where: { type: "TABLE" } }),
   };
 
   console.log("\n✓ Dane demo gotowe:", JSON.stringify(counts));
   console.log("  Właściciel:  wlasciciel@demo.pl / " + DEMO_PASSWORD);
   console.log("  Pracownik:   adam@demo.pl / " + DEMO_PASSWORD);
   console.log("  Klient:      klient@demo.pl / " + DEMO_PASSWORD);
+}
+
+// ---------------------------------------------------------------------------
+// Restauracje (faza 7)
+// ---------------------------------------------------------------------------
+
+type SeedTable = {
+  number: string;
+  min: number;
+  max: number;
+  shape: "ROUND" | "SQUARE" | "RECTANGLE";
+  x: number;
+  y: number;
+  spanX?: number;
+  spanY?: number;
+  combinable?: boolean;
+};
+
+type SeedRoom = {
+  name: string;
+  area: "INDOOR" | "OUTDOOR" | "BAR" | "PRIVATE";
+  gridWidth: number;
+  gridHeight: number;
+  tables: SeedTable[];
+};
+
+type SeedRestaurant = {
+  slug: string;
+  name: string;
+  description: string;
+  ownerEmail: string;
+  ownerName: string;
+  plan: SubscriptionPlan;
+  location: {
+    name: string;
+    address: string;
+    city: string;
+    postal: string;
+    phone: string;
+    lat: number;
+    lng: number;
+  };
+  /// pon–ndz; brak wpisu = zamknięte
+  opening: { weekday: number; startMinute: number; endMinute: number }[];
+  rooms: SeedRoom[];
+  /// pary stolików do zestawiania: numery stolików + łączna pojemność
+  combinations: { name: string; tables: string[]; min: number; max: number }[];
+  turnTimes: { min: number; max: number; duration: number }[];
+  pacing: {
+    weekday: number | null;
+    startMinute: number;
+    endMinute: number;
+    maxCovers: number;
+  }[];
+  maxPartySizeOnline: number;
+  reviews: { clientIdx: number; rating: number; comment: string; reply?: string; daysAgo: number }[];
+};
+
+const RESTAURANTS: SeedRestaurant[] = [
+  {
+    slug: "bistro-kwadrat-warszawa",
+    name: "Bistro Kwadrat",
+    description:
+      "Sezonowa kuchnia polska w nowym wydaniu. Otwarta kuchnia, karta win naturalnych, latem taras od podwórka.",
+    ownerEmail: "rezerwacje@bistrokwadrat.pl",
+    ownerName: "Kasia Wrona",
+    plan: "TEAM",
+    location: {
+      name: "Bistro Kwadrat",
+      address: "ul. Hoża 42",
+      city: "Warszawa",
+      postal: "00-516",
+      phone: "+48 22 622 14 08",
+      lat: 52.2245,
+      lng: 21.0119,
+    },
+    opening: [
+      ...[1, 2, 3].map((weekday) => ({ weekday, startMinute: hhmm(12), endMinute: hhmm(22) })),
+      { weekday: 4, startMinute: hhmm(12), endMinute: hhmm(23) },
+      { weekday: 5, startMinute: hhmm(12), endMinute: hhmm(23) },
+      { weekday: 6, startMinute: hhmm(12), endMinute: hhmm(21) },
+    ],
+    rooms: [
+      {
+        name: "Sala główna",
+        area: "INDOOR",
+        gridWidth: 20,
+        gridHeight: 14,
+        tables: [
+          { number: "1", min: 2, max: 2, shape: "ROUND", x: 1, y: 1, combinable: true },
+          { number: "2", min: 2, max: 2, shape: "ROUND", x: 4, y: 1, combinable: true },
+          { number: "3", min: 2, max: 3, shape: "SQUARE", x: 7, y: 1, combinable: true },
+          { number: "4", min: 4, max: 4, shape: "SQUARE", x: 11, y: 1, spanX: 3, spanY: 3 },
+          { number: "5", min: 4, max: 5, shape: "RECTANGLE", x: 15, y: 1, spanX: 4, spanY: 3 },
+          { number: "6", min: 2, max: 2, shape: "ROUND", x: 1, y: 6, combinable: true },
+          { number: "7", min: 2, max: 2, shape: "ROUND", x: 4, y: 6, combinable: true },
+          { number: "8", min: 4, max: 4, shape: "SQUARE", x: 7, y: 6, spanX: 3, spanY: 3 },
+          { number: "9", min: 4, max: 6, shape: "RECTANGLE", x: 11, y: 6, spanX: 4, spanY: 3 },
+          { number: "10", min: 6, max: 8, shape: "RECTANGLE", x: 15, y: 6, spanX: 4, spanY: 4 },
+          { number: "11", min: 2, max: 4, shape: "SQUARE", x: 1, y: 10, spanX: 3, spanY: 3 },
+          { number: "12", min: 2, max: 4, shape: "SQUARE", x: 5, y: 10, spanX: 3, spanY: 3 },
+        ],
+      },
+      {
+        name: "Taras",
+        area: "OUTDOOR",
+        gridWidth: 14,
+        gridHeight: 10,
+        tables: [
+          { number: "T1", min: 2, max: 2, shape: "ROUND", x: 1, y: 1, combinable: true },
+          { number: "T2", min: 2, max: 2, shape: "ROUND", x: 4, y: 1, combinable: true },
+          { number: "T3", min: 4, max: 4, shape: "SQUARE", x: 7, y: 1, spanX: 3, spanY: 3 },
+          { number: "T4", min: 4, max: 6, shape: "RECTANGLE", x: 1, y: 5, spanX: 4, spanY: 3 },
+          { number: "T5", min: 2, max: 4, shape: "SQUARE", x: 7, y: 5, spanX: 3, spanY: 3 },
+        ],
+      },
+    ],
+    combinations: [
+      { name: "1+2", tables: ["1", "2"], min: 3, max: 4 },
+      { name: "6+7", tables: ["6", "7"], min: 3, max: 4 },
+      { name: "T1+T2", tables: ["T1", "T2"], min: 3, max: 4 },
+      { name: "9+10 (duża grupa)", tables: ["9", "10"], min: 9, max: 14 },
+    ],
+    turnTimes: [
+      { min: 1, max: 2, duration: 90 },
+      { min: 3, max: 4, duration: 105 },
+      { min: 5, max: 6, duration: 120 },
+      { min: 7, max: 14, duration: 150 },
+    ],
+    pacing: [
+      // Szczyt kolacyjny — kuchnia przyjmuje maks. 12 osób na kwadrans.
+      { weekday: null, startMinute: hhmm(18), endMinute: hhmm(21), maxCovers: 12 },
+      { weekday: null, startMinute: hhmm(12), endMinute: hhmm(15), maxCovers: 16 },
+    ],
+    maxPartySizeOnline: 8,
+    reviews: [
+      {
+        clientIdx: 2,
+        rating: 5,
+        comment: "Kaczka z buraczkami — najlepsze, co jadłam w tym roku. Rezerwacja online w 30 sekund.",
+        reply: "Dziękujemy! Kaczka wraca do karty w październiku.",
+        daysAgo: 5,
+      },
+      { clientIdx: 4, rating: 5, comment: "Taras od podwórka to najlepiej strzeżona tajemnica Hożej.", daysAgo: 12 },
+      { clientIdx: 1, rating: 4, comment: "Jedzenie świetne, obsługa uprzejma. Przy pełnej sali bywa głośno.", daysAgo: 20 },
+      { clientIdx: 3, rating: 5, comment: "Byliśmy w ósemkę na urodzinach — zestawili stoliki, wszystko dopięte.", daysAgo: 28 },
+    ],
+  },
+  {
+    slug: "trattoria-sole-krakow",
+    name: "Trattoria Sole",
+    description:
+      "Rodzinna trattoria na Kazimierzu. Makarony robione codziennie rano, pizza z pieca opalanego drewnem.",
+    ownerEmail: "ciao@trattoriasole.pl",
+    ownerName: "Marco Bianchi",
+    plan: "PRO",
+    location: {
+      name: "Trattoria Sole",
+      address: "ul. Meiselsa 5",
+      city: "Kraków",
+      postal: "31-058",
+      phone: "+48 12 430 22 17",
+      lat: 50.0518,
+      lng: 19.9426,
+    },
+    opening: [
+      ...[0, 1, 2, 3].map((weekday) => ({ weekday, startMinute: hhmm(13), endMinute: hhmm(22) })),
+      { weekday: 4, startMinute: hhmm(13), endMinute: hhmm(23) },
+      { weekday: 5, startMinute: hhmm(12), endMinute: hhmm(23) },
+      { weekday: 6, startMinute: hhmm(12), endMinute: hhmm(21) },
+    ],
+    rooms: [
+      {
+        name: "Sala",
+        area: "INDOOR",
+        gridWidth: 16,
+        gridHeight: 12,
+        tables: [
+          { number: "1", min: 2, max: 2, shape: "ROUND", x: 1, y: 1, combinable: true },
+          { number: "2", min: 2, max: 2, shape: "ROUND", x: 4, y: 1, combinable: true },
+          { number: "3", min: 2, max: 3, shape: "SQUARE", x: 7, y: 1, spanX: 3, spanY: 3 },
+          { number: "4", min: 4, max: 4, shape: "SQUARE", x: 11, y: 1, spanX: 3, spanY: 3 },
+          { number: "5", min: 4, max: 6, shape: "RECTANGLE", x: 1, y: 5, spanX: 4, spanY: 3 },
+          { number: "6", min: 4, max: 4, shape: "SQUARE", x: 6, y: 5, spanX: 3, spanY: 3 },
+          { number: "7", min: 6, max: 8, shape: "RECTANGLE", x: 10, y: 5, spanX: 5, spanY: 3 },
+          { number: "8", min: 2, max: 4, shape: "SQUARE", x: 1, y: 9, spanX: 3, spanY: 2 },
+        ],
+      },
+      {
+        name: "Bar",
+        area: "BAR",
+        gridWidth: 10,
+        gridHeight: 6,
+        tables: [
+          { number: "B1", min: 1, max: 2, shape: "ROUND", x: 1, y: 1, spanX: 2, spanY: 2 },
+          { number: "B2", min: 1, max: 2, shape: "ROUND", x: 4, y: 1, spanX: 2, spanY: 2 },
+          { number: "B3", min: 2, max: 3, shape: "SQUARE", x: 7, y: 1, spanX: 2, spanY: 2 },
+        ],
+      },
+    ],
+    combinations: [
+      { name: "1+2", tables: ["1", "2"], min: 3, max: 4 },
+      { name: "5+6", tables: ["5", "6"], min: 7, max: 10 },
+    ],
+    turnTimes: [
+      { min: 1, max: 2, duration: 75 },
+      { min: 3, max: 4, duration: 90 },
+      { min: 5, max: 8, duration: 120 },
+      { min: 9, max: 12, duration: 150 },
+    ],
+    pacing: [{ weekday: null, startMinute: hhmm(18), endMinute: hhmm(21), maxCovers: 10 }],
+    maxPartySizeOnline: 6,
+    reviews: [
+      { clientIdx: 5, rating: 5, comment: "Cacio e pepe jak w Rzymie. Marco pamięta stałych gości po imieniu.", reply: "Grazie Tomasz! A presto.", daysAgo: 6 },
+      { clientIdx: 0, rating: 5, comment: "Pizza z pieca, cienkie ciasto, dobra cena. Wracamy co miesiąc.", daysAgo: 15 },
+      { clientIdx: 2, rating: 4, comment: "Bardzo smacznie, ale w piątek wieczorem ciasno przy barze.", daysAgo: 24 },
+    ],
+  },
+];
+
+async function seedRestaurants(
+  clientUsers: { id: string; name: string | null; email: string | null }[],
+  passwordHash: string,
+) {
+  for (const definition of RESTAURANTS) {
+    console.log(`→ ${definition.name} (${definition.location.city}) — restauracja`);
+
+    const owner = await prisma.user.upsert({
+      where: { email: definition.ownerEmail },
+      update: { passwordHash, role: "BUSINESS_OWNER", name: definition.ownerName },
+      create: {
+        email: definition.ownerEmail,
+        name: definition.ownerName,
+        role: "BUSINESS_OWNER",
+        passwordHash,
+      },
+    });
+
+    const business = await prisma.business.create({
+      data: {
+        slug: definition.slug,
+        name: definition.name,
+        type: "RESTAURANT",
+        status: "ACTIVE",
+        description: definition.description,
+        ownerId: owner.id,
+        locations: {
+          create: {
+            name: definition.location.name,
+            addressLine1: definition.location.address,
+            city: definition.location.city,
+            postalCode: definition.location.postal,
+            phone: definition.location.phone,
+            latitude: definition.location.lat,
+            longitude: definition.location.lng,
+            timezone: TIMEZONE,
+            slotGranularityMin: 15,
+            minLeadTimeMin: 60,
+            maxAdvanceDays: 60,
+            cancellationCutoffHours: 4,
+            maxPartySizeOnline: definition.maxPartySizeOnline,
+            waitlistEnabled: true,
+            defaultTurnTimeMin: 90,
+            tableBufferMin: 15,
+            openingHours: { create: definition.opening },
+          },
+        },
+      },
+      include: { locations: true },
+    });
+    const location = business.locations[0];
+
+    await prisma.subscription.create({
+      data: {
+        businessId: business.id,
+        plan: definition.plan,
+        status: "ACTIVE",
+        currentPeriodEnd: new Date(Date.now() + 30 * DAY_MS),
+      },
+    });
+
+    // Usługa techniczna — nadaje rezerwacji stolika czas trwania i cenę 0.
+    const reservationService = await prisma.service.create({
+      data: {
+        businessId: business.id,
+        name: "Rezerwacja stolika",
+        kind: "TABLE_RESERVATION",
+        durationMin: location.defaultTurnTimeMin,
+        priceCents: 0,
+        priceType: "FREE",
+        onlineBookable: true,
+      },
+    });
+
+    // Sale i stoliki
+    const tablesByNumber = new Map<string, string>();
+    for (const [roomIndex, room] of definition.rooms.entries()) {
+      const createdRoom = await prisma.room.create({
+        data: {
+          locationId: location.id,
+          name: room.name,
+          sortOrder: roomIndex,
+          gridWidth: room.gridWidth,
+          gridHeight: room.gridHeight,
+        },
+      });
+
+      for (const [tableIndex, table] of room.tables.entries()) {
+        const resource = await prisma.resource.create({
+          data: {
+            locationId: location.id,
+            roomId: createdRoom.id,
+            type: "TABLE",
+            name: `Stolik ${table.number}`,
+            tableNumber: table.number,
+            area: room.area,
+            shape: table.shape,
+            capacityMin: table.min,
+            capacityMax: table.max,
+            posX: table.x,
+            posY: table.y,
+            spanX: table.spanX ?? 2,
+            spanY: table.spanY ?? 2,
+            combinable: table.combinable ?? false,
+            sortOrder: roomIndex * 100 + tableIndex,
+            // Stolik jest dostępny w godzinach otwarcia lokalu.
+            workingHours: { create: definition.opening },
+            services: { create: { serviceId: reservationService.id } },
+          },
+        });
+        tablesByNumber.set(table.number, resource.id);
+      }
+    }
+
+    // Zestawienia stolików
+    for (const combo of definition.combinations) {
+      const memberIds = combo.tables
+        .map((number) => tablesByNumber.get(number))
+        .filter((id): id is string => Boolean(id));
+      if (memberIds.length !== combo.tables.length) continue;
+      await prisma.tableCombination.create({
+        data: {
+          locationId: location.id,
+          name: combo.name,
+          capacityMin: combo.min,
+          capacityMax: combo.max,
+          members: { create: memberIds.map((resourceId) => ({ resourceId })) },
+        },
+      });
+    }
+
+    // Turn time i pacing
+    await prisma.turnTimeRule.createMany({
+      data: definition.turnTimes.map((rule) => ({
+        locationId: location.id,
+        partySizeMin: rule.min,
+        partySizeMax: rule.max,
+        durationMin: rule.duration,
+      })),
+    });
+    await prisma.pacingRule.createMany({
+      data: definition.pacing.map((rule) => ({
+        locationId: location.id,
+        weekday: rule.weekday,
+        startMinute: rule.startMinute,
+        endMinute: rule.endMinute,
+        intervalMin: 15,
+        maxCovers: rule.maxCovers,
+      })),
+    });
+
+    // Profile klientów w restauracji
+    const customerIds = new Map<number, string>();
+    const customerFor = async (clientIdx: number) => {
+      const cached = customerIds.get(clientIdx);
+      if (cached) return cached;
+      const client = CLIENTS[clientIdx];
+      const row = await prisma.customer.create({
+        data: {
+          businessId: business.id,
+          userId: clientUsers[clientIdx].id,
+          fullName: client.name,
+          email: client.email,
+          phone: client.phone,
+        },
+      });
+      customerIds.set(clientIdx, row.id);
+      return row.id;
+    };
+
+    const turnTimeFor = (partySize: number) =>
+      definition.turnTimes.find((r) => partySize >= r.min && partySize <= r.max)?.duration ??
+      location.defaultTurnTimeMin;
+
+    const tableIds = [...tablesByNumber.values()];
+
+    // Opinie na zakończonych wizytach w przeszłości.
+    for (const [index, review] of definition.reviews.entries()) {
+      const partySize = 2 + (index % 4);
+      const day = new Date(Date.now() - review.daysAgo * DAY_MS);
+      const start = localDayMinutesToUtc(
+        { year: day.getUTCFullYear(), month: day.getUTCMonth() + 1, day: day.getUTCDate() },
+        hhmm(18) + (index % 3) * 30,
+        TIMEZONE,
+      );
+      const duration = turnTimeFor(partySize);
+      const end = addMinutes(start, duration);
+
+      const booking = await prisma.booking.create({
+        data: {
+          businessId: business.id,
+          locationId: location.id,
+          customerId: await customerFor(review.clientIdx),
+          customerUserId: clientUsers[review.clientIdx].id,
+          status: "COMPLETED",
+          source: "WEB_MARKETPLACE",
+          startAt: start,
+          endAt: end,
+          totalPriceCents: 0,
+          partySize,
+          items: {
+            create: {
+              serviceId: reservationService.id,
+              resourceId: tableIds[index % tableIds.length],
+              startAt: start,
+              endAt: end,
+              blockedStartAt: start,
+              blockedEndAt: addMinutes(end, location.tableBufferMin),
+              durationMin: duration,
+              bufferAfterMin: location.tableBufferMin,
+              priceCents: 0,
+            },
+          },
+        },
+      });
+
+      await prisma.review.create({
+        data: {
+          businessId: business.id,
+          bookingId: booking.id,
+          authorUserId: clientUsers[review.clientIdx].id,
+          rating: review.rating,
+          comment: review.comment,
+          reply: review.reply ?? null,
+          repliedAt: review.reply ? new Date(Date.now() - (review.daysAgo - 1) * DAY_MS) : null,
+        },
+      });
+    }
+
+    // Dzisiejszy i jutrzejszy wieczór — żeby widok hosta i plan sali żyły.
+    const evenings = [
+      { dayOffset: 0, slots: [[hhmm(18), 2], [hhmm(18) + 30, 4], [hhmm(19), 2], [hhmm(19) + 30, 6], [hhmm(20), 3]] },
+      { dayOffset: 1, slots: [[hhmm(18) + 30, 2], [hhmm(19), 4], [hhmm(19) + 45, 2], [hhmm(20) + 30, 5]] },
+    ];
+
+    let seatedIndex = 0;
+    for (const evening of evenings) {
+      const day = new Date(Date.now() + evening.dayOffset * DAY_MS);
+      for (const [minute, partySize] of evening.slots) {
+        const start = localDayMinutesToUtc(
+          { year: day.getUTCFullYear(), month: day.getUTCMonth() + 1, day: day.getUTCDate() },
+          minute,
+          TIMEZONE,
+        );
+        const duration = turnTimeFor(partySize);
+        const end = addMinutes(start, duration);
+        // Stolik dobrany po pojemności, z rotacją, żeby nie kolidowały ze sobą.
+        const candidates = [...tablesByNumber.entries()];
+        const chosen = candidates[(seatedIndex * 3) % candidates.length];
+        seatedIndex += 1;
+        const clientIdx = seatedIndex % CLIENTS.length;
+
+        await prisma.booking.create({
+          data: {
+            businessId: business.id,
+            locationId: location.id,
+            customerId: await customerFor(clientIdx),
+            customerUserId: clientUsers[clientIdx].id,
+            status: evening.dayOffset === 0 && minute <= hhmm(19) ? "CONFIRMED" : "PENDING",
+            source: seatedIndex % 3 === 0 ? "MANUAL_STAFF" : "WEB_MARKETPLACE",
+            startAt: start,
+            endAt: end,
+            totalPriceCents: 0,
+            partySize,
+            customerNote: seatedIndex % 4 === 0 ? "Poproszę stolik przy oknie" : null,
+            items: {
+              create: {
+                serviceId: reservationService.id,
+                resourceId: chosen[1],
+                startAt: start,
+                endAt: end,
+                blockedStartAt: start,
+                blockedEndAt: addMinutes(end, location.tableBufferMin),
+                durationMin: duration,
+                bufferAfterMin: location.tableBufferMin,
+                priceCents: 0,
+              },
+            },
+          },
+        });
+      }
+    }
+
+    // Jeden wpis na liście oczekujących — na dziś, na pełną godzinę szczytu.
+    const today = new Date();
+    await prisma.waitlistEntry.create({
+      data: {
+        businessId: business.id,
+        locationId: location.id,
+        requestedAt: localDayMinutesToUtc(
+          { year: today.getUTCFullYear(), month: today.getUTCMonth() + 1, day: today.getUTCDate() },
+          hhmm(19),
+          TIMEZONE,
+        ),
+        flexMin: 60,
+        partySize: 4,
+        guestName: "Ewa Michalska",
+        guestPhone: "+48 604 118 227",
+        guestEmail: "ewa.michalska@example.com",
+        note: "Możemy przyjść też o 20:00",
+      },
+    });
+  }
 }
 
 main()

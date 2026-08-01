@@ -15,12 +15,13 @@ import {
 import { cityDisplay } from "@/app/m/miasta";
 import { AvailabilityPill } from "@/components/marketplace/availability-pill";
 import { FavoriteButton } from "@/components/marketplace/favorite-button";
+import { OpeningHoursList } from "@/components/marketplace/opening-hours-list";
+import { ReviewsSection } from "@/components/marketplace/reviews-section";
 import { SiteFooter } from "@/components/marketplace/site-footer";
 import { SiteHeader } from "@/components/marketplace/site-header";
+import { RestaurantProfile } from "@/components/restaurant/restaurant-profile";
 import {
-  WEEKDAYS_LONG,
   formatDuration,
-  minutesToLabel,
   nearestSlotLabel,
   openStatus,
   priceLabel,
@@ -59,65 +60,8 @@ const SCHEMA_DAYS = [
 const minutesToHHMM = (minutes: number) =>
   `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 
-/** "1 opinia" / "3 opinie" / "12 opinii". */
-function reviewsCountLabel(count: number): string {
-  if (count === 1) return "1 opinia";
-  const mod10 = count % 10;
-  const mod100 = count % 100;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
-    return `${count} opinie`;
-  }
-  return `${count} opinii`;
-}
-
-/** Gwiazdki 1–5 — wypełnione atramentem, reszta w kolorze obramowań. */
-function Stars({ rating }: { rating: number }) {
-  return (
-    <span
-      role="img"
-      aria-label={`Ocena ${rating} na 5`}
-      className="font-mono text-[13px] tracking-[0.15em]"
-    >
-      <span>{"★".repeat(rating)}</span>
-      <span className="text-border">{"★".repeat(5 - rating)}</span>
-    </span>
-  );
-}
-
 const tabTriggerClass =
   "flex-none px-0 text-[13px] font-medium text-[#8f8b81] data-active:font-bold data-active:text-foreground rounded-none border-0 pb-2 after:bottom-0 after:h-[2.5px]";
-
-/** Lista godzin otwarcia per dzień — używana w zakładce Info i sticky karcie. */
-function OpeningHoursList({
-  openingHours,
-}: {
-  openingHours: { weekday: number; startMinute: number; endMinute: number }[];
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      {WEEKDAYS_LONG.map((dayName, weekday) => {
-        const blocks = openingHours.filter(
-          (entry) => entry.weekday === weekday,
-        );
-        return (
-          <div key={dayName} className="flex justify-between text-[13px]">
-            <span className="capitalize">{dayName}</span>
-            <span className="font-mono text-muted-foreground">
-              {blocks.length === 0
-                ? "zamknięte"
-                : blocks
-                    .map(
-                      (block) =>
-                        `${minutesToLabel(block.startMinute)}–${minutesToLabel(block.endMinute)}`,
-                    )
-                    .join(", ")}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 
 export async function generateMetadata({
   params,
@@ -129,6 +73,7 @@ export async function generateMetadata({
     where: { slug, status: "ACTIVE" },
     select: {
       name: true,
+      type: true,
       description: true,
       locations: {
         where: { isActive: true },
@@ -139,13 +84,17 @@ export async function generateMetadata({
   });
   if (!business) return {};
 
+  const isRestaurant = business.type === "RESTAURANT";
   const city = business.locations[0]?.city;
+  const suffix = isRestaurant ? "rezerwacja stolika" : "rezerwacja online";
   const title = city
-    ? `${business.name} — ${cityDisplay(city)} | rezerwacja online`
-    : `${business.name} | rezerwacja online`;
+    ? `${business.name} — ${cityDisplay(city)} | ${suffix}`
+    : `${business.name} | ${suffix}`;
   const description =
     business.description?.slice(0, 160) ??
-    `Sprawdź cennik, zespół i opinie${city ? ` — ${business.name}, ${cityDisplay(city)}` : ""}. Zarezerwuj wizytę online.`;
+    (isRestaurant
+      ? `Zarezerwuj stolik online${city ? ` — ${business.name}, ${cityDisplay(city)}` : ""}. Sprawdź godziny, strefy i opinie.`
+      : `Sprawdź cennik, zespół i opinie${city ? ` — ${business.name}, ${cityDisplay(city)}` : ""}. Zarezerwuj wizytę online.`);
   const url = `${env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")}/b/${slug}`;
 
   return {
@@ -163,6 +112,16 @@ export default async function BusinessProfilePage({
 }) {
   const { slug } = await params;
 
+  // Restauracja ma inny profil (rezerwacja stolika zamiast cennika usług) —
+  // rozgałęziamy się PRZED ciężkim zapytaniem o usługi i zespół, bo dla
+  // lokalu gastronomicznego nie ma ono sensu.
+  const kind = await prisma.business.findFirst({
+    where: { slug, status: "ACTIVE" },
+    select: { type: true },
+  });
+  if (!kind) notFound();
+  if (kind.type === "RESTAURANT") return <RestaurantProfile slug={slug} />;
+
   const business = await prisma.business.findFirst({
     where: { slug, status: "ACTIVE" },
     select: {
@@ -176,7 +135,9 @@ export default async function BusinessProfilePage({
         select: { id: true, name: true },
       },
       services: {
-        where: { isActive: true },
+        // `TABLE_RESERVATION` to techniczny nośnik rezerwacji stolika —
+        // nigdy nie pokazuje się jako pozycja cennika.
+        where: { isActive: true, kind: "STANDARD" },
         orderBy: { sortOrder: "asc" },
         select: {
           id: true,
@@ -292,14 +253,6 @@ export default async function BusinessProfilePage({
       percent: reviewsTotal === 0 ? 0 : Math.round((count / reviewsTotal) * 100),
     };
   });
-
-  const reviewDateLabel = (date: Date) =>
-    new Intl.DateTimeFormat("pl-PL", {
-      timeZone: location.timezone,
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-    }).format(date);
 
   // Dane strukturalne LocalBusiness/HairSalon dla wyszukiwarek.
   const appUrl = env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "");
@@ -518,100 +471,13 @@ export default async function BusinessProfilePage({
           </TabsContent>
 
           <TabsContent value="opinie">
-            {reviewsTotal === 0 ? (
-              <div className="mx-auto max-w-md py-12 text-center">
-                <h2 className="mb-2 font-display text-[24px] leading-tight font-extrabold tracking-tight">
-                  Jeszcze brak opinii.
-                </h2>
-                <p className="mx-auto max-w-[280px] text-[13px] leading-relaxed text-muted-foreground">
-                  Opinię można wystawić po zakończonej wizycie — bądź pierwszą
-                  osobą, która oceni to miejsce.
-                </p>
-              </div>
-            ) : (
-              <>
-                <div className="mt-5 flex items-center gap-6 rounded-2xl border border-border bg-card p-4 md:gap-8 md:p-5">
-                  <div className="flex-none text-center">
-                    <div className="font-display text-[44px] leading-none font-extrabold tracking-tight">
-                      {ratingScore}
-                    </div>
-                    <div className="mt-1.5 font-mono text-[11px] text-muted-foreground">
-                      {reviewsCountLabel(reviewsTotal)}
-                    </div>
-                  </div>
-                  <div className="flex min-w-0 flex-1 flex-col gap-[7px]">
-                    {ratingDistribution.map((row) => (
-                      <div
-                        key={row.stars}
-                        className="flex items-center gap-2.5"
-                      >
-                        <span className="w-3 flex-none text-right font-mono text-[11px] text-muted-foreground">
-                          {row.stars}
-                        </span>
-                        <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-                          <div
-                            className="h-full rounded-full bg-foreground"
-                            style={{ width: `${row.percent}%` }}
-                          />
-                        </div>
-                        <span className="w-6 flex-none font-mono text-[11px] text-muted-foreground">
-                          {row.count}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="mt-2 flex flex-col">
-                  {reviews.map((review) => (
-                    <article
-                      key={review.id}
-                      className="border-t border-muted py-4 first:border-t-0"
-                    >
-                      <div className="flex items-baseline justify-between gap-3">
-                        <div className="min-w-0 truncate text-[14px] font-bold">
-                          {review.author.name ?? "Klient"}
-                        </div>
-                        <div className="flex-none font-mono text-[11px] text-muted-foreground">
-                          {reviewDateLabel(review.createdAt)}
-                        </div>
-                      </div>
-                      <div className="mt-0.5">
-                        <Stars rating={review.rating} />
-                      </div>
-                      {review.comment ? (
-                        <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/80">
-                          {review.comment}
-                        </p>
-                      ) : null}
-                      {review.reply ? (
-                        <div className="mt-3 ml-4 rounded-r-xl border-l-2 border-border-strong bg-muted/60 py-2.5 pr-3.5 pl-3.5">
-                          <div className="flex items-baseline justify-between gap-3">
-                            <div className="meta-label">
-                              Odpowiedź właściciela
-                            </div>
-                            {review.repliedAt ? (
-                              <div className="flex-none font-mono text-[10px] text-muted-foreground">
-                                {reviewDateLabel(review.repliedAt)}
-                              </div>
-                            ) : null}
-                          </div>
-                          <p className="mt-1 text-[13px] leading-relaxed text-foreground/80">
-                            {review.reply}
-                          </p>
-                        </div>
-                      ) : null}
-                    </article>
-                  ))}
-                </div>
-                {reviewsTotal > reviews.length ? (
-                  <p className="border-t border-muted pt-4 text-[12.5px] text-muted-foreground">
-                    Pokazujemy {reviews.length} najnowszych opinii z{" "}
-                    {reviewsTotal}.
-                  </p>
-                ) : null}
-              </>
-            )}
+            <ReviewsSection
+              reviews={reviews}
+              total={reviewsTotal}
+              ratingScore={ratingScore}
+              distribution={ratingDistribution}
+              timezone={location.timezone}
+            />
           </TabsContent>
 
           <TabsContent value="info">

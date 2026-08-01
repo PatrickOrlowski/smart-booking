@@ -7,6 +7,9 @@ import { resultsCountLabel } from "@/components/marketplace/business-card";
 import { SearchInput } from "@/components/marketplace/search-input";
 import { SiteFooter } from "@/components/marketplace/site-footer";
 import { SiteHeader } from "@/components/marketplace/site-header";
+import { RestaurantCard } from "@/components/restaurant/restaurant-card";
+import { getNearestTableSlot } from "@/components/restaurant/nearest-table";
+import { tableSlotLabel } from "@/components/restaurant/format";
 import {
   formatPrice,
   nearestSlotLabel,
@@ -38,6 +41,7 @@ async function findBusinesses(q: string | undefined) {
       id: true,
       slug: true,
       name: true,
+      type: true,
       locations: {
         where: { isActive: true },
         take: 1,
@@ -48,6 +52,9 @@ async function findBusinesses(q: string | undefined) {
         where: {
           isActive: true,
           onlineBookable: true,
+          // Rezerwacja stolika nie jest pozycją cennika — restauracja
+          // pokazuje najbliższy wolny stolik, nie cenę „od".
+          kind: "STANDARD",
           priceType: { in: ["FIXED", "FROM"] },
         },
         orderBy: { priceCents: "asc" },
@@ -80,8 +87,15 @@ export default async function Home({
   const query = q?.trim() || undefined;
 
   const businesses = await findBusinesses(query);
+  // Restauracja nie ma „najbliższego wolnego terminu" usługi — ma najbliższy
+  // wolny STOLIK, liczony zupełnie innym silnikiem (turn time, pacing).
   const nearestSlots = await Promise.all(
-    businesses.map((business) => getNearestSlot(business.slug).catch(() => null)),
+    businesses.map((business) =>
+      (business.type === "RESTAURANT"
+        ? getNearestTableSlot(business.slug)
+        : getNearestSlot(business.slug)
+      ).catch(() => null),
+    ),
   );
 
   return (
@@ -165,6 +179,21 @@ export default async function Home({
             const slotLabel = nearest
               ? nearestSlotLabel(nearest.startAt, nearest.timezone)
               : null;
+
+            if (business.type === "RESTAURANT") {
+              return (
+                <RestaurantCard
+                  key={business.id}
+                  business={{ ...business, rating }}
+                  promoted={index === 0}
+                  slotLabel={
+                    nearest
+                      ? tableSlotLabel(nearest.startAt, nearest.timezone)
+                      : null
+                  }
+                />
+              );
+            }
 
             if (index === 0) {
               // Wynik promowany — pełna karta z obrysem border-strong.

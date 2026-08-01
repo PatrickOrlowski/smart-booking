@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import type { BusinessType } from "@/generated/prisma/enums";
 import { prisma } from "@/lib/prisma";
 import { env } from "@/lib/env";
 import {
@@ -11,6 +12,7 @@ import {
 } from "@/components/marketplace/business-card";
 import { SiteFooter } from "@/components/marketplace/site-footer";
 import { SiteHeader } from "@/components/marketplace/site-header";
+import { RestaurantCard } from "@/components/restaurant/restaurant-card";
 import {
   citySlug,
   cityInPhrase,
@@ -57,9 +59,18 @@ export async function generateMetadata({
   };
 }
 
+/**
+ * Restauracja dostaje inną kartę (najbliższy wolny stolik zamiast ceny „od"),
+ * więc listing musi znać typ firmy i strefę lokalu.
+ */
+type ListingBusiness = BusinessCardData & {
+  type: BusinessType;
+  locations: { addressLine1: string; city: string; timezone: string }[];
+};
+
 async function findBusinessesInCity(
   variants: string[],
-): Promise<{ businesses: BusinessCardData[]; total: number }> {
+): Promise<{ businesses: ListingBusiness[]; total: number }> {
   // Miasto wpisuje właściciel, więc pod jednym slugiem żyją różne zapisy
   // („Gdańsk", „Gdansk"). Filtrujemy po komplecie wariantów — `equals`
   // na jednym z nich gubiłby firmy z pozostałych.
@@ -76,16 +87,20 @@ async function findBusinessesInCity(
         id: true,
         slug: true,
         name: true,
+        type: true,
         locations: {
           // Firma z kilkoma lokalami ma pokazać adres tego z oglądanego miasta.
           where: { isActive: true, city: cityFilter },
           take: 1,
-          select: { addressLine1: true, city: true },
+          select: { addressLine1: true, city: true, timezone: true },
         },
         services: {
           where: {
             isActive: true,
             onlineBookable: true,
+            // Rezerwacja stolika nie jest pozycją cennika — restauracja
+            // pokazuje najbliższy wolny stolik, nie cenę „od".
+            kind: "STANDARD",
             priceType: { in: ["FIXED", "FROM"] },
           },
           orderBy: { priceCents: "asc" },
@@ -183,13 +198,21 @@ export default async function CityPage({
         ) : (
           <>
             <div className="flex flex-col gap-3.5 md:grid md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-5">
-              {businesses.map((business, index) => (
-                <BusinessCard
-                  key={business.id}
-                  business={business}
-                  promoted={index === 0}
-                />
-              ))}
+              {businesses.map((business, index) =>
+                business.type === "RESTAURANT" ? (
+                  <RestaurantCard
+                    key={business.id}
+                    business={business}
+                    promoted={index === 0}
+                  />
+                ) : (
+                  <BusinessCard
+                    key={business.id}
+                    business={business}
+                    promoted={index === 0}
+                  />
+                ),
+              )}
             </div>
             {total > businesses.length ? (
               <p className="mt-6 text-center text-[12.5px] text-muted-foreground">

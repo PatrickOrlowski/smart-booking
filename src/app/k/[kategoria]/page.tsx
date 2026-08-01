@@ -12,6 +12,7 @@ import {
 } from "@/components/marketplace/business-card";
 import { SiteFooter } from "@/components/marketplace/site-footer";
 import { SiteHeader } from "@/components/marketplace/site-header";
+import { RestaurantCard } from "@/components/restaurant/restaurant-card";
 import { KATEGORIA_SLUGS, KATEGORIE } from "../kategorie";
 
 /**
@@ -47,9 +48,18 @@ export async function generateMetadata({
   };
 }
 
+/**
+ * Karta restauracji potrzebuje strefy lokalu — pastylkę „Stolik dziś od
+ * 18:00" dolicza przeglądarka (strona jest statyczna), a dzień lokalny musi
+ * wyjść ze strefy lokalu, nie z zegara gościa.
+ */
+type ListingBusiness = BusinessCardData & {
+  locations: { addressLine1: string; city: string; timezone: string }[];
+};
+
 async function findBusinessesOfType(
   type: BusinessType,
-): Promise<{ businesses: BusinessCardData[]; total: number }> {
+): Promise<{ businesses: ListingBusiness[]; total: number }> {
   const where = { status: "ACTIVE" as const, type };
 
   const [rows, total] = await Promise.all([
@@ -62,12 +72,15 @@ async function findBusinessesOfType(
         locations: {
           where: { isActive: true },
           take: 1,
-          select: { addressLine1: true, city: true },
+          select: { addressLine1: true, city: true, timezone: true },
         },
         services: {
           where: {
             isActive: true,
             onlineBookable: true,
+            // Rezerwacja stolika nie jest pozycją cennika — restauracja
+            // pokazuje najbliższy wolny stolik, nie cenę „od".
+            kind: "STANDARD",
             priceType: { in: ["FIXED", "FROM"] },
           },
           orderBy: { priceCents: "asc" },
@@ -161,13 +174,21 @@ export default async function CategoryPage({
         ) : (
           <>
             <div className="flex flex-col gap-3.5 md:grid md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-5">
-              {businesses.map((business, index) => (
-                <BusinessCard
-                  key={business.id}
-                  business={business}
-                  promoted={index === 0}
-                />
-              ))}
+              {businesses.map((business, index) =>
+                entry.type === "RESTAURANT" ? (
+                  <RestaurantCard
+                    key={business.id}
+                    business={business}
+                    promoted={index === 0}
+                  />
+                ) : (
+                  <BusinessCard
+                    key={business.id}
+                    business={business}
+                    promoted={index === 0}
+                  />
+                ),
+              )}
             </div>
             {total > businesses.length ? (
               <p className="mt-6 text-center text-[12.5px] text-muted-foreground">

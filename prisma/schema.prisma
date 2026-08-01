@@ -134,6 +134,36 @@ enum SubscriptionStatus {
   CANCELLED
 }
 
+/// Kształt stolika na planie sali.
+enum TableShape {
+  ROUND
+  SQUARE
+  RECTANGLE
+}
+
+/// Strefa lokalu — klient wybiera preferencję przy rezerwacji.
+enum RestaurantArea {
+  INDOOR
+  OUTDOOR
+  BAR
+  PRIVATE
+}
+
+enum WaitlistStatus {
+  WAITING
+  NOTIFIED
+  CONVERTED
+  EXPIRED
+  CANCELLED
+}
+
+/// Odróżnia zwykłą usługę od syntetycznej „rezerwacji stolika", która nie
+/// pokazuje się w cenniku, ale nadaje rezerwacji restauracyjnej czas trwania.
+enum ServiceKind {
+  STANDARD
+  TABLE_RESERVATION
+}
+
 // ---------------------------------------------------------------------------
 // Auth.js (Prisma adapter)
 // ---------------------------------------------------------------------------
@@ -152,12 +182,13 @@ model User {
 
   accounts         Account[]
   sessions         Session[]
-  ownedBusinesses  Business[]     @relation("BusinessOwner")
+  ownedBusinesses  Business[]      @relation("BusinessOwner")
   staffProfiles    StaffProfile[]
-  bookings         Booking[]      @relation("BookingCustomer")
+  bookings         Booking[]       @relation("BookingCustomer")
   customerProfiles Customer[]
   reviews          Review[]
   favorites        Favorite[]
+  waitlistEntries  WaitlistEntry[]
 
   @@map("users")
 }
@@ -235,6 +266,7 @@ model Business {
   favorites    Favorite[]
   payments     Payment[]
   subscription Subscription?
+  waitlist     WaitlistEntry[]
 
   @@index([ownerId])
   @@index([status, type])
@@ -262,15 +294,30 @@ model Location {
   maxAdvanceDays          Int @default(60) @map("max_advance_days")
   cancellationCutoffHours Int @default(24) @map("cancellation_cutoff_hours")
 
+  /// --- Ustawienia restauracyjne (Business.type = RESTAURANT) ---
+  /// Powyżej tej liczby osób rezerwacja online jest zablokowana („zadzwoń").
+  maxPartySizeOnline Int?    @map("max_party_size_online")
+  /// Czy przy braku stolika proponujemy zapis na listę oczekujących.
+  waitlistEnabled    Boolean @default(false) @map("waitlist_enabled")
+  /// Domyślny czas zajęcia stolika, gdy nie pasuje żadna reguła TurnTimeRule.
+  defaultTurnTimeMin Int     @default(90) @map("default_turn_time_min")
+  /// Przerwa na posprzątanie stolika między rezerwacjami.
+  tableBufferMin     Int     @default(15) @map("table_buffer_min")
+
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  business     Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  resources    Resource[]
-  openingHours OpeningHours[]
-  timeOff      TimeOff[]
-  bookings     Booking[]
+  business      Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  resources     Resource[]
+  openingHours  OpeningHours[]
+  timeOff       TimeOff[]
+  bookings      Booking[]
+  rooms         Room[]
+  turnTimeRules TurnTimeRule[]
+  pacingRules   PacingRule[]
+  combinations  TableCombination[]
+  waitlist      WaitlistEntry[]
 
   @@index([businessId])
   @@index([city])
@@ -304,7 +351,7 @@ model Resource {
   name        String
   description String?
   imageUrl    String?      @map("image_url")
-  /// Pojemność — używane dla stolików (faza 7), null dla pracowników.
+  /// Pojemność — używane dla stolików, null dla pracowników.
   capacityMin Int?         @map("capacity_min")
   capacityMax Int?         @map("capacity_max")
   sortOrder   Int          @default(0) @map("sort_order")
@@ -312,15 +359,33 @@ model Resource {
   createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt   DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  location     Location          @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  /// --- Pola stolika (type = TABLE), wszystkie null dla pracowników ---
+  roomId      String?         @map("room_id")
+  /// Numer widoczny dla obsługi, np. „12" albo „T3".
+  tableNumber String?         @map("table_number")
+  area        RestaurantArea?
+  shape       TableShape?
+  /// Pozycja na planie sali w jednostkach siatki (lewy górny róg).
+  posX        Int?            @map("pos_x")
+  posY        Int?            @map("pos_y")
+  /// Rozmiar na planie w jednostkach siatki.
+  spanX       Int?            @map("span_x")
+  spanY       Int?            @map("span_y")
+  /// Czy stolik można łączyć z sąsiednimi (patrz TableCombination).
+  combinable  Boolean         @default(false)
+
+  location     Location                 @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  room         Room?                    @relation(fields: [roomId], references: [id], onDelete: SetNull)
   staffProfile StaffProfile?
   services     ServiceResource[]
   workingHours WorkingHours[]
   timeOff      TimeOff[]
   bookingItems BookingItem[]
   holds        Hold[]
+  combinations TableCombinationMember[]
 
   @@index([locationId, type])
+  @@index([roomId])
   @@map("resources")
 }
 
@@ -413,6 +478,11 @@ model Service {
   bufferBeforeMin Int @default(0) @map("buffer_before_min")
   bufferAfterMin  Int @default(0) @map("buffer_after_min")
 
+  /// TABLE_RESERVATION to usługa techniczna restauracji — nie pokazuje się
+  /// w cenniku ani na profilu, a jedynie nadaje rezerwacji stolika czas trwania
+  /// (nadpisywany przez TurnTimeRule zależnie od liczby osób).
+  kind ServiceKind @default(STANDARD)
+
   /// Ceny w groszach — brak arytmetyki zmiennoprzecinkowej na pieniądzach.
   priceCents Int       @map("price_cents")
   priceType  PriceType @default(FIXED) @map("price_type")
@@ -495,6 +565,7 @@ model Booking {
   review        Review?
   notifications Notification[]
   payments      Payment[]
+  waitlistEntry WaitlistEntry?
 
   @@index([businessId, startAt])
   @@index([locationId, startAt])
@@ -581,13 +652,148 @@ model Customer {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  user     User?     @relation(fields: [userId], references: [id])
+  business Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user     User?           @relation(fields: [userId], references: [id])
   bookings Booking[]
+  waitlist WaitlistEntry[]
 
   @@unique([businessId, userId])
   @@index([businessId, phone])
   @@map("customers")
+}
+
+// ---------------------------------------------------------------------------
+// Restauracje: sale, stoliki, turn time, pacing, lista oczekujących (faza 7)
+// ---------------------------------------------------------------------------
+
+/// Sala lokalu. Plan sali to siatka — stoliki mają pozycję (posX/posY)
+/// i rozmiar (spanX/spanY) w jednostkach tej siatki.
+model Room {
+  id         String @id @default(cuid())
+  locationId String @map("location_id")
+  name       String
+  sortOrder  Int    @default(0) @map("sort_order")
+  /// Rozmiar planu w jednostkach siatki.
+  gridWidth  Int    @default(20) @map("grid_width")
+  gridHeight Int    @default(14) @map("grid_height")
+
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  location Location   @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  tables   Resource[]
+
+  @@index([locationId])
+  @@map("rooms")
+}
+
+/// Zestaw stolików, które obsługa potrafi zestawić w jeden większy.
+/// Rezerwacja takiego zestawu tworzy pozycję na KAŻDYM stoliku członkowskim,
+/// więc ograniczenie wykluczające pilnuje ich zajętości pojedynczo.
+model TableCombination {
+  id          String  @id @default(cuid())
+  locationId  String  @map("location_id")
+  name        String
+  capacityMin Int     @map("capacity_min")
+  capacityMax Int     @map("capacity_max")
+  isActive    Boolean @default(true) @map("is_active")
+
+  location Location                 @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  members  TableCombinationMember[]
+
+  @@index([locationId])
+  @@map("table_combinations")
+}
+
+model TableCombinationMember {
+  id            String @id @default(cuid())
+  combinationId String @map("combination_id")
+  resourceId    String @map("resource_id")
+
+  combination TableCombination @relation(fields: [combinationId], references: [id], onDelete: Cascade)
+  resource    Resource         @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@unique([combinationId, resourceId])
+  @@index([resourceId])
+  @@map("table_combination_members")
+}
+
+/// Czas zajęcia stolika zależny od liczby osób: para siedzi 90 minut,
+/// szóstka 150. Zakresy nie powinny się nakładać — pierwsza pasująca wygrywa.
+model TurnTimeRule {
+  id           String @id @default(cuid())
+  locationId   String @map("location_id")
+  partySizeMin Int    @map("party_size_min")
+  partySizeMax Int    @map("party_size_max")
+  durationMin  Int    @map("duration_min")
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([locationId, partySizeMin])
+  @@map("turn_time_rules")
+}
+
+/// Ograniczenie tempa przyjmowania gości: maks. tylu nowych gości (albo tylu
+/// rezerwacji) może zaczynać wizytę w danym oknie czasowym. Bez tego kuchnia
+/// dostaje 40 osób na 19:00 i pada.
+model PacingRule {
+  id          String @id @default(cuid())
+  locationId  String @map("location_id")
+  /// null = reguła obowiązuje w każdy dzień tygodnia
+  weekday     Int?
+  /// Okno czasowe w minutach od północy czasu lokalnego.
+  startMinute Int    @map("start_minute")
+  endMinute   Int    @map("end_minute")
+  /// Rozmiar przedziału, w którym liczymy limit (np. co 15 minut).
+  intervalMin Int    @default(15) @map("interval_min")
+  /// Limity — co najmniej jeden musi być ustawiony.
+  maxCovers   Int?   @map("max_covers")
+  maxBookings Int?   @map("max_bookings")
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([locationId, weekday])
+  @@map("pacing_rules")
+}
+
+/// Zapis na listę oczekujących, gdy brak wolnego stolika.
+model WaitlistEntry {
+  id         String @id @default(cuid())
+  businessId String @map("business_id")
+  locationId String @map("location_id")
+
+  /// Preferowany termin i tolerancja (± minut), w jakiej klient przyjmie stolik.
+  requestedAt DateTime @map("requested_at") @db.Timestamptz(3)
+  flexMin     Int      @default(60) @map("flex_min")
+  partySize   Int      @map("party_size")
+
+  customerUserId String? @map("customer_user_id")
+  customerId     String? @map("customer_id")
+  guestName      String? @map("guest_name")
+  guestEmail     String? @map("guest_email")
+  guestPhone     String? @map("guest_phone")
+  note           String?
+
+  status     WaitlistStatus @default(WAITING)
+  /// Kiedy wysłano powiadomienie o zwolnionym stoliku i do kiedy jest ważne.
+  notifiedAt DateTime?      @map("notified_at") @db.Timestamptz(3)
+  holdUntil  DateTime?      @map("hold_until") @db.Timestamptz(3)
+  /// Rezerwacja, w którą zamienił się wpis.
+  bookingId  String?        @unique @map("booking_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  location Location  @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [customerId], references: [id])
+  user     User?     @relation(fields: [customerUserId], references: [id])
+  booking  Booking?  @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([locationId, status, requestedAt])
+  @@index([businessId, status])
+  @@map("waitlist_entries")
 }
 
 // ---------------------------------------------------------------------------

@@ -34,7 +34,7 @@ export default async function DashboardLayout({
             </span>
           </div>
         </div>
-        <PanelNav />
+        <PanelNav isRestaurant={business.type === "RESTAURANT"} />
         <div className="ml-auto hidden shrink-0 font-mono text-[11px] text-ink-foreground/60 md:block">
           {location
             ? `${location.city} · ${location.timezone}`

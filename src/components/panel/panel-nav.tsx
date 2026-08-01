@@ -5,7 +5,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 
-const NAV_ITEMS = [
+type NavItem = { href: string; label: string };
+
+const NAV_ITEMS: NavItem[] = [
   { href: "/panel", label: "Kalendarz" },
   { href: "/panel/uslugi", label: "Usługi" },
   { href: "/panel/zespol", label: "Zespół" },
@@ -15,7 +17,13 @@ const NAV_ITEMS = [
   { href: "/panel/aktywnosc", label: "Aktywność" },
   { href: "/panel/ustawienia", label: "Ustawienia" },
   { href: "/panel/plan", label: "Plan" },
-] as const;
+];
+
+/** Pozycje wyłącznie dla restauracji — salon ich nie widzi. */
+const RESTAURANT_ITEMS: NavItem[] = [
+  { href: "/panel/dzis", label: "Dziś" },
+  { href: "/panel/sale", label: "Sale" },
+];
 
 /**
  * Nawigacja pigułkami w ciemnym top-barze — wg przepisu z DESIGN.md.
@@ -23,9 +31,14 @@ const NAV_ITEMS = [
  * własnym kontenerze (bez widocznego paska) — strona nigdy nie scrolluje
  * poziomo. Poniżej `lg` cele dotykowe rosną do ≥44px.
  */
-export function PanelNav() {
+export function PanelNav({ isRestaurant = false }: { isRestaurant?: boolean }) {
   const pathname = usePathname();
   const navRef = useRef<HTMLElement>(null);
+  // Widok hosta („Dziś") i plan sal siedzą tuż za kalendarzem — to codzienne
+  // narzędzia restauracji, nie ustawienia.
+  const items = isRestaurant
+    ? [NAV_ITEMS[0]!, ...RESTAURANT_ITEMS, ...NAV_ITEMS.slice(1)]
+    : NAV_ITEMS;
 
   // Przewijana nawigacja: aktywna pigułka nie może zostać poza kadrem.
   useEffect(() => {
@@ -39,7 +52,7 @@ export function PanelNav() {
       ref={navRef}
       className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
     >
-      {NAV_ITEMS.map((item) => {
+      {items.map((item) => {
         const active =
           item.href === "/panel"
             ? pathname === "/panel"

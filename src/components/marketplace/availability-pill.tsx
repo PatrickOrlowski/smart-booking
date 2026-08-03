@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { DEFAULT_LOCALE, createTranslator, type Locale } from "@/i18n";
 
 /**
  * Pastylka „Najbliższy wolny termin: dziś 15:30" — przepis z DESIGN.md:
@@ -7,10 +8,14 @@ import { cn } from "@/lib/utils";
 export function AvailabilityPill({
   label,
   className,
+  locale = DEFAULT_LOCALE,
 }: {
   label: string | null;
   className?: string;
+  locale?: Locale;
 }) {
+  const t = createTranslator(locale);
+
   if (!label) {
     return (
       <div
@@ -20,7 +25,7 @@ export function AvailabilityPill({
         )}
       >
         <span className="text-xs font-semibold text-muted-foreground">
-          Brak terminów w tym tygodniu
+          {t("pill.noneWeek")}
         </span>
       </div>
     );
@@ -35,7 +40,7 @@ export function AvailabilityPill({
     >
       <span className="size-1.5 rounded-full bg-success [animation:pulse-dot_1.8s_infinite]" />
       <span className="text-xs font-semibold text-primary">
-        Najbliższy wolny termin: {label}
+        {t("pill.nearest", { label })}
       </span>
     </div>
   );

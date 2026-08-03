@@ -57,7 +57,9 @@ export type HostBooking = {
 const STATUS_LABELS: Record<BookingStatus, string> = {
   PENDING: "oczekuje",
   CONFIRMED: "potwierdzona",
-  COMPLETED: "przy stole",
+  // Posadzenie gościa NIE zmienia statusu (zostaje CONFIRMED + wpis audytu
+  // widoczny jako „posadzeni HH:MM") — COMPLETED to wizyta już rozliczona.
+  COMPLETED: "zakończona",
   CANCELLED_BY_CUSTOMER: "odwołana",
   CANCELLED_BY_BUSINESS: "odwołana",
   NO_SHOW: "nie przyszli",

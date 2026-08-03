@@ -26,6 +26,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { formatMinutes } from "@/components/panel/format";
+import { turnTimeFor } from "@/components/restaurant/types";
 import { createWalkInBookingAction } from "@/app/panel/(dashboard)/dzis/actions";
 
 /**
@@ -40,9 +42,17 @@ export type WalkInTableOption = {
   roomName: string;
   capacityMin: number | null;
   capacityMax: number | null;
-  /** Stolik zajęty albo w buforze sprzątania — nie da się go teraz posadzić. */
-  busy: boolean;
-  busyLabel: string | null;
+  /**
+   * Stolik zajęty (albo w buforze sprzątania) już w chwili startu walk-inu —
+   * gotowa etykieta „zajęty do 21:00". null = wolny na starcie.
+   */
+  occupiedLabel: string | null;
+  /**
+   * Początek najbliższej rezerwacji PO starcie walk-inu (minuty czasu lokalu).
+   * null = do końca dnia nic nie stoi na przeszkodzie. Turn time zależy od
+   * liczby osób, więc dopiero dialog wie, czy pobyt się w tym zmieści.
+   */
+  freeUntilMin: number | null;
 };
 
 export type TurnTimeRuleView = {
@@ -58,6 +68,9 @@ export function HostWalkInDialog({
   tables,
   turnTimeRules,
   defaultTurnTimeMin,
+  tableBufferMin,
+  startMin,
+  closeMin,
   startLabel,
   disabled,
 }: {
@@ -65,6 +78,12 @@ export function HostWalkInDialog({
   tables: WalkInTableOption[];
   turnTimeRules: TurnTimeRuleView[];
   defaultTurnTimeMin: number;
+  /** Bufor sprzątania doliczany po wyjściu gości. */
+  tableBufferMin: number;
+  /** Minuta startu walk-inu w czasie lokalu; null = lokal zamknięty. */
+  startMin: number | null;
+  /** Zamknięcie okna, w którym wypada walk-in; null = lokal zamknięty. */
+  closeMin: number | null;
   /** „teraz (18:20)" albo „od otwarcia (12:00)" — policzone w strefie lokalu. */
   startLabel: string;
   disabled?: boolean;
@@ -77,28 +96,56 @@ export function HostWalkInDialog({
   const [guestName, setGuestName] = useState("");
   const [note, setNote] = useState("");
 
-  const turnTimeMin = useMemo(() => {
-    const rule = turnTimeRules
-      .filter(
-        (entry) =>
-          entry.partySizeMin <= partySize && partySize <= entry.partySizeMax,
-      )
-      .sort((a, b) => a.partySizeMin - b.partySizeMin)[0];
-    return rule?.durationMin ?? defaultTurnTimeMin;
-  }, [turnTimeRules, partySize, defaultTurnTimeMin]);
+  // Jedno źródło reguły turn time dla klienta — łącznie z zachowaniem dla grup
+  // powyżej najwyższej reguły (dostają jej czas, nie wartość domyślną).
+  const turnTimeMin = useMemo(
+    () => turnTimeFor(turnTimeRules, partySize, defaultTurnTimeMin),
+    [turnTimeRules, partySize, defaultTurnTimeMin],
+  );
 
-  // Wolne stoliki na górze listy, w każdej grupie sensowna pojemność najpierw.
-  const options = useMemo(() => {
-    return [...tables].sort((a, b) => {
-      if (a.busy !== b.busy) return a.busy ? 1 : -1;
-      const fitsA = (a.capacityMax ?? 99) >= partySize ? 0 : 1;
-      const fitsB = (b.capacityMax ?? 99) >= partySize ? 0 : 1;
-      if (fitsA !== fitsB) return fitsA - fitsB;
-      return a.number.localeCompare(b.number, "pl", { numeric: true });
+  /**
+   * Koniec blokady, jaką założy serwer: pobyt przycięty do zamknięcia plus
+   * bufor sprzątania. Wcześniej lista sprawdzała kolizję tylko w bieżącej
+   * minucie, więc stolik z rezerwacją za godzinę wyglądał na wolny, a akcja
+   * i tak kończyła się błędem 23P01.
+   */
+  const blockedEndMin =
+    startMin === null
+      ? null
+      : Math.min(startMin + turnTimeMin, closeMin ?? startMin + turnTimeMin) +
+        tableBufferMin;
+
+  const rows = useMemo(() => {
+    const decorated = tables.map((table) => {
+      const tooEarly = table.occupiedLabel !== null;
+      const collides =
+        !tooEarly &&
+        blockedEndMin !== null &&
+        table.freeUntilMin !== null &&
+        table.freeUntilMin < blockedEndMin;
+      return {
+        table,
+        busy: tooEarly || collides,
+        busyLabel: tooEarly
+          ? table.occupiedLabel
+          : collides
+            ? `wolny tylko do ${formatMinutes(table.freeUntilMin!)}`
+            : null,
+      };
     });
-  }, [tables, partySize]);
+    // Wolne stoliki na górze listy, w każdej grupie sensowna pojemność najpierw.
+    return decorated.sort((a, b) => {
+      if (a.busy !== b.busy) return a.busy ? 1 : -1;
+      const fitsA = (a.table.capacityMax ?? 99) >= partySize ? 0 : 1;
+      const fitsB = (b.table.capacityMax ?? 99) >= partySize ? 0 : 1;
+      if (fitsA !== fitsB) return fitsA - fitsB;
+      return a.table.number.localeCompare(b.table.number, "pl", {
+        numeric: true,
+      });
+    });
+  }, [tables, partySize, blockedEndMin]);
 
-  const selected = options.find((table) => table.id === resourceId) ?? null;
+  const selected = rows.find((row) => row.table.id === resourceId)?.table ?? null;
   const tooSmall =
     selected !== null &&
     selected.capacityMax !== null &&
@@ -175,21 +222,15 @@ export function HostWalkInDialog({
                 <SelectValue placeholder="Wybierz stolik" />
               </SelectTrigger>
               <SelectContent className="max-h-72">
-                {options.map((table) => (
-                  <SelectItem
-                    key={table.id}
-                    value={table.id}
-                    disabled={table.busy}
-                  >
+                {rows.map(({ table, busy, busyLabel }) => (
+                  <SelectItem key={table.id} value={table.id} disabled={busy}>
                     <span className="font-mono">{table.number}</span>
                     <span className="text-muted-foreground">
                       {table.roomName}
                       {table.capacityMax !== null
                         ? ` · ${table.capacityMin ?? 1}–${table.capacityMax} os.`
                         : ""}
-                      {table.busy && table.busyLabel
-                        ? ` · ${table.busyLabel}`
-                        : ""}
+                      {busy && busyLabel ? ` · ${busyLabel}` : ""}
                     </span>
                   </SelectItem>
                 ))}

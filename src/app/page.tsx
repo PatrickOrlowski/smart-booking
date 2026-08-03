@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
 import { prisma } from "@/lib/prisma";
@@ -14,11 +15,27 @@ import {
   formatPrice,
   nearestSlotLabel,
 } from "@/components/marketplace/format";
+import { LocaleProvider } from "@/i18n/client";
+import { getTranslations } from "@/i18n/server";
+import type { MessageKey } from "@/i18n";
 
 // Dostępność zależy od „teraz" — strona nie może być statyczna.
 export const dynamic = "force-dynamic";
 
-const FILTER_CHIPS = ["Wolne dziś", "Ocena 4,5+", "do 100 zł", "< 2 km"];
+const FILTER_CHIP_KEYS: MessageKey[] = [
+  "home.chip.today",
+  "home.chip.rating",
+  "home.chip.price",
+  "home.chip.distance",
+];
+
+export async function generateMetadata(): Promise<Metadata> {
+  const { t } = await getTranslations();
+  return {
+    title: t("home.meta.title"),
+    description: t("home.meta.description"),
+  };
+}
 
 async function findBusinesses(q: string | undefined) {
   return prisma.business.findMany({
@@ -71,11 +88,17 @@ async function findBusinesses(q: string | undefined) {
   });
 }
 
-const ratingLabel = (reviews: { rating: number }[]) => {
-  if (reviews.length === 0) return { score: "5,0", count: 0 };
+const ratingLabel = (
+  reviews: { rating: number }[],
+  separator: string,
+): { score: string; count: number } => {
+  if (reviews.length === 0) return { score: `5${separator}0`, count: 0 };
   const average =
     reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length;
-  return { score: average.toFixed(1).replace(".", ","), count: reviews.length };
+  return {
+    score: average.toFixed(1).replace(".", separator),
+    count: reviews.length,
+  };
 };
 
 export default async function Home({
@@ -85,6 +108,8 @@ export default async function Home({
 }) {
   const { q } = await searchParams;
   const query = q?.trim() || undefined;
+  const { locale, t } = await getTranslations();
+  const decimalSeparator = locale === "pl" ? "," : ".";
 
   const businesses = await findBusinesses(query);
   // Restauracja nie ma „najbliższego wolnego terminu" usługi — ma najbliższy
@@ -99,12 +124,12 @@ export default async function Home({
   );
 
   return (
-    <>
-      <SiteHeader />
+    <LocaleProvider locale={locale}>
+      <SiteHeader locale={locale} />
       <main className="mx-auto w-full max-w-md px-5 pt-4 pb-16 md:max-w-3xl lg:max-w-6xl lg:px-8 lg:pt-8">
       <div className="mb-[18px] flex items-center justify-between">
         <div>
-          <div className="meta-label">Lokalizacja</div>
+          <div className="meta-label">{t("home.location")}</div>
           <div className="flex items-center gap-1.5 font-display text-[19px] font-bold tracking-tight">
             Warszawa{" "}
             <span className="text-[11px] text-muted-foreground">▾</span>
@@ -113,9 +138,9 @@ export default async function Home({
       </div>
 
       <h1 className="mb-4 font-display text-[34px] leading-none font-extrabold tracking-tight lg:mb-6 lg:text-[44px] xl:text-[52px]">
-        Zarezerwuj
+        {t("home.heading1")}
         <br />
-        na dziś.
+        {t("home.heading2")}
       </h1>
 
       <div className="lg:mb-7 lg:flex lg:items-center lg:gap-3">
@@ -126,16 +151,16 @@ export default async function Home({
         </div>
 
         <div className="mb-[22px] flex gap-2 overflow-x-auto pb-1 lg:mb-0 lg:flex-none lg:overflow-visible lg:pb-0">
-          {FILTER_CHIPS.map((chip, index) => (
+          {FILTER_CHIP_KEYS.map((chipKey, index) => (
             <span
-              key={chip}
+              key={chipKey}
               className={
                 index === 0
                   ? "flex-none rounded-full bg-primary px-[13px] py-2 text-xs font-semibold text-primary-foreground"
                   : "flex-none rounded-full border border-border bg-card px-[13px] py-2 text-xs font-semibold text-foreground/80"
               }
             >
-              {chip}
+              {t(chipKey)}
             </span>
           ))}
         </div>
@@ -143,30 +168,29 @@ export default async function Home({
 
       <div className="mb-3 flex items-baseline justify-between">
         <h2 className="font-display text-base font-bold tracking-tight">
-          {query ? `Wyniki dla „${query}"` : "W pobliżu"}
+          {query ? t("home.resultsFor", { query }) : t("home.nearby")}
         </h2>
         <span className="font-mono text-[11px] text-muted-foreground">
-          {/* Jedna reguła liczebnika dla wszystkich listingów — inline
-              `< 5 ? "wyniki"` dawało „0 wyniki" i „22 wyników". */}
-          {resultsCountLabel(businesses.length)}
+          {/* Jedna reguła liczebnika dla wszystkich listingów — Intl.PluralRules. */}
+          {resultsCountLabel(businesses.length, locale)}
         </span>
       </div>
 
       {businesses.length === 0 ? (
         <div className="mx-auto max-w-md py-14 text-center">
           <h2 className="mb-2 font-display text-[27px] leading-tight font-extrabold tracking-tight">
-            Nic nie
+            {t("home.empty.title1")}
             <br />
-            znaleźliśmy.
+            {t("home.empty.title2")}
           </h2>
           <p className="mx-auto mb-6 max-w-[260px] text-[13px] leading-relaxed text-muted-foreground">
-            Brak firm pasujących do „{query}”. Spróbuj innej nazwy albo miasta.
+            {t("home.empty.text", { query: query ?? "" })}
           </p>
           <Link
             href="/"
             className="inline-block rounded-full bg-primary px-4 py-2 text-[13px] font-semibold text-primary-foreground"
           >
-            Wyczyść wyszukiwanie
+            {t("home.empty.clear")}
           </Link>
         </div>
       ) : (
@@ -174,10 +198,10 @@ export default async function Home({
           {businesses.map((business, index) => {
             const location = business.locations[0];
             const nearest = nearestSlots[index];
-            const rating = ratingLabel(business.reviews);
+            const rating = ratingLabel(business.reviews, decimalSeparator);
             const priceFrom = business.services[0];
             const slotLabel = nearest
-              ? nearestSlotLabel(nearest.startAt, nearest.timezone)
+              ? nearestSlotLabel(nearest.startAt, nearest.timezone, locale)
               : null;
 
             if (business.type === "RESTAURANT") {
@@ -186,9 +210,10 @@ export default async function Home({
                   key={business.id}
                   business={{ ...business, rating }}
                   promoted={index === 0}
+                  locale={locale}
                   slotLabel={
                     nearest
-                      ? tableSlotLabel(nearest.startAt, nearest.timezone)
+                      ? tableSlotLabel(nearest.startAt, nearest.timezone, locale)
                       : null
                   }
                 />
@@ -204,7 +229,7 @@ export default async function Home({
                   className="block overflow-hidden rounded-2xl border-[1.5px] border-border-strong bg-card md:flex md:flex-col"
                 >
                   <div className="photo-placeholder flex h-28 flex-none items-center justify-center font-mono text-[10px] tracking-[0.08em] text-[#8f8b81]">
-                    ZDJĘCIE LOKALU 16:9
+                    {t("common.photo169")}
                   </div>
                   <div className="px-[15px] pt-[13px] pb-[15px] md:flex md:flex-1 md:flex-col">
                     <div className="flex items-start justify-between gap-2.5">
@@ -221,11 +246,11 @@ export default async function Home({
                         ? `${location.addressLine1}, ${location.city}`
                         : ""}
                       {priceFrom
-                        ? ` · od ${formatPrice(priceFrom.priceCents, priceFrom.currency)}`
+                        ? ` · ${t("format.priceFrom", { price: formatPrice(priceFrom.priceCents, priceFrom.currency, locale) })}`
                         : ""}
                     </div>
                     <div className="mt-[11px] md:mt-auto md:pt-[11px]">
-                      <AvailabilityPill label={slotLabel} />
+                      <AvailabilityPill label={slotLabel} locale={locale} />
                     </div>
                   </div>
                 </Link>
@@ -240,7 +265,7 @@ export default async function Home({
               >
                 <div className="photo-placeholder flex size-[62px] flex-none items-center justify-center rounded-xl md:h-28 md:w-full md:rounded-none">
                   <span className="hidden font-mono text-[10px] tracking-[0.08em] text-[#8f8b81] md:block">
-                    ZDJĘCIE LOKALU
+                    {t("common.photo")}
                   </span>
                 </div>
                 <div className="min-w-0 md:flex md:flex-1 md:flex-col md:px-[15px] md:pt-[13px] md:pb-[15px]">
@@ -254,9 +279,9 @@ export default async function Home({
                     {rating.score} ({rating.count})
                   </div>
                   <div className="mt-1.5 text-xs text-muted-foreground md:mt-auto md:pt-2">
-                    Najbliższy wolny:{" "}
+                    {t("home.nearestFree")}{" "}
                     <span className="font-semibold text-foreground">
-                      {slotLabel ?? "brak w tym tygodniu"}
+                      {slotLabel ?? t("home.noneThisWeek")}
                     </span>
                   </div>
                 </div>
@@ -266,7 +291,7 @@ export default async function Home({
         </div>
       )}
       </main>
-      <SiteFooter />
-    </>
+      <SiteFooter locale={locale} />
+    </LocaleProvider>
   );
 }

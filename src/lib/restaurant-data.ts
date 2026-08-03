@@ -100,6 +100,12 @@ export type RestaurantContext = {
   areas: RestaurantArea[];
   /** Największa grupa, jaką lokal fizycznie posadzi (stolik lub zestawienie). */
   maxPartySizeSeatable: number;
+  /**
+   * Najmniejsza grupa, jaką lokal fizycznie posadzi (najniższe `capacityMin`).
+   * Lokal z samymi stolikami „od 2 osób" nie sadza pojedynczych gości —
+   * bez tego pola silnik zwracał zero slotów, a UI kłamał, że jest komplet.
+   */
+  minPartySizeSeatable: number;
 };
 
 const AREA_ORDER: RestaurantArea[] = ["INDOOR", "OUTDOOR", "BAR", "PRIVATE"];
@@ -279,6 +285,12 @@ export async function getRestaurantLocation(
     ...tables.map((table) => table.capacityMax),
     ...combinations.map((combination) => combination.capacityMax),
   );
+  // Lokal bez stolików nie ma dolnej granicy do pokazania — zostaje 1,
+  // a i tak nie znajdzie żadnego slotu.
+  const minPartySizeSeatable =
+    tables.length === 0
+      ? 1
+      : Math.min(...tables.map((table) => table.capacityMin));
 
   return {
     business: {
@@ -316,6 +328,7 @@ export async function getRestaurantLocation(
     pacingRules: location.pacingRules,
     areas,
     maxPartySizeSeatable,
+    minPartySizeSeatable,
   };
 }
 
@@ -610,6 +623,19 @@ export function partyTooLargeMessage(context: RestaurantContext): string {
   const limit = context.location.maxPartySizeOnline ?? 0;
   const phone = context.location.phone;
   return `Dla grup powyżej ${limit} osób zadzwoń do lokalu${
+    phone ? `: ${phone}` : ""
+  }.`;
+}
+
+/**
+ * Komunikat dla grup mniejszych niż najmniejszy stolik lokalu. Bez niego
+ * gość widział „brak wolnych stolików" i listę oczekujących, choć problemem
+ * nie jest obłożenie, tylko to, że lokal nie sadza tak małych grup.
+ */
+export function partyTooSmallMessage(context: RestaurantContext): string {
+  const min = context.minPartySizeSeatable;
+  const phone = context.location.phone;
+  return `Najmniejszy stolik w tym lokalu jest dla ${min} osób — rezerwację dla mniejszej grupy ustal telefonicznie${
     phone ? `: ${phone}` : ""
   }.`;
 }

@@ -4,8 +4,9 @@ import { useMemo, useState } from "react";
 import { BellRing } from "lucide-react";
 import { zonedTimeToUtc } from "@/lib/time";
 import { formatTimeInZone } from "@/components/marketplace/format";
+import { useTranslations } from "@/i18n/client";
 import { isoDayLabel, partySizeLabel } from "./format";
-import type { RestaurantBookingData } from "./types";
+import { turnTimeFor, type RestaurantBookingData } from "./types";
 
 /**
  * Zapis na listę oczekujących — pokazywany tam, gdzie kończą się wolne
@@ -16,6 +17,7 @@ import type { RestaurantBookingData } from "./types";
  * potem zamieniana na instant UTC — nigdy z zegara przeglądarki.
  */
 
+/** Etykiety „±30 min" są symbolowo-liczbowe — wspólne dla obu języków. */
 const FLEX_OPTIONS = [
   { value: 30, label: "±30 min" },
   { value: 60, label: "±1 h" },
@@ -39,6 +41,7 @@ export function WaitlistForm({
   date: string;
   partySize: number;
 }) {
+  const { locale, t } = useTranslations();
   const [name, setName] = useState(data.user?.name ?? "");
   const [phone, setPhone] = useState(data.user?.phone ?? "");
   const [email, setEmail] = useState(data.user?.email ?? "");
@@ -50,6 +53,15 @@ export function WaitlistForm({
   // „Teraz" bierzemy z zegara serwera (props), nie z `Date.now()` w renderze.
   const nowMs = Date.parse(data.nowIso);
 
+  // Pobyt grupy musi zmieścić się do zamknięcia — dla szóstki (turn time
+  // 120 min) sztywne „−60 min" oferowało godzinę, na którą lokal i tak nie
+  // przyjąłby wpisu.
+  const turnTimeMin = turnTimeFor(
+    data.turnTimeRules,
+    partySize,
+    data.defaultTurnTimeMin,
+  );
+
   // Możliwe pory: co 30 min w godzinach otwarcia tego dnia, tylko przyszłe.
   const times = useMemo(() => {
     const [year, month, day] = date.split("-").map(Number);
@@ -60,7 +72,7 @@ export function WaitlistForm({
     )) {
       for (
         let minute = block.startMinute;
-        minute <= block.endMinute - 60;
+        minute <= block.endMinute - turnTimeMin;
         minute += 30
       ) {
         const instant = zonedTimeToUtc(
@@ -81,7 +93,7 @@ export function WaitlistForm({
       }
     }
     return result.sort((a, b) => a.iso.localeCompare(b.iso));
-  }, [date, data.openingHours, data.timezone, nowMs]);
+  }, [date, data.openingHours, data.timezone, nowMs, turnTimeMin]);
 
   const [requestedAt, setRequestedAt] = useState<string>("");
   const selectedTime = requestedAt || times[0]?.iso || "";
@@ -89,8 +101,10 @@ export function WaitlistForm({
   if (times.length === 0) {
     return (
       <p className="rounded-2xl border border-border bg-card p-4 text-[12.5px] text-muted-foreground">
-        Tego dnia lokal jest już zamknięty — wybierz inny dzień, żeby zapisać
-        się na listę oczekujących.
+        {t("wl.noneFitting", {
+          party: partySizeLabel(partySize, locale),
+          turn: turnTimeMin,
+        })}
       </p>
     );
   }
@@ -102,12 +116,14 @@ export function WaitlistForm({
           <BellRing aria-hidden className="size-4" />
         </div>
         <div className="font-display text-[19px] leading-tight font-extrabold tracking-tight">
-          Jesteś na liście oczekujących
+          {t("wl.onList")}
         </div>
         <p className="mt-1.5 text-[12.5px] leading-relaxed text-foreground/80">
-          Odezwiemy się, jeśli stolik się zwolni — {isoDayLabel(date)} około{" "}
-          {formatTimeInZone(new Date(selectedTime), data.timezone)},{" "}
-          {partySizeLabel(partySize)}. Zapis nie jest rezerwacją.
+          {t("wl.onListText", {
+            day: isoDayLabel(date, locale),
+            time: formatTimeInZone(new Date(selectedTime), data.timezone),
+            party: partySizeLabel(partySize, locale),
+          })}
         </p>
       </div>
     );
@@ -117,11 +133,11 @@ export function WaitlistForm({
     setError(null);
     if (!data.user) {
       if (name.trim().length < 2) {
-        setError("Podaj imię i nazwisko.");
+        setError(t("wl.errName"));
         return;
       }
       if (phone.trim().length < 7 && !/^\S+@\S+\.\S+$/.test(email.trim())) {
-        setError("Podaj telefon albo e-mail — inaczej nie damy znać.");
+        setError(t("wl.errContact"));
         return;
       }
     }
@@ -153,9 +169,9 @@ export function WaitlistForm({
         setDone(true);
         return;
       }
-      setError(json?.message ?? "Nie udało się zapisać. Spróbuj ponownie.");
+      setError(json?.message ?? t("wl.submitFailed"));
     } catch {
-      setError("Błąd połączenia. Sprawdź internet i spróbuj ponownie.");
+      setError(t("common.connectionError"));
     } finally {
       setSubmitting(false);
     }
@@ -163,13 +179,12 @@ export function WaitlistForm({
 
   return (
     <div className="rounded-2xl border border-border bg-card p-4">
-      <div className="meta-label">Lista oczekujących</div>
+      <div className="meta-label">{t("wl.label")}</div>
       <div className="mt-1 mb-1.5 font-display text-[19px] leading-tight font-extrabold tracking-tight">
-        Damy znać, gdy stolik się zwolni
+        {t("wl.title")}
       </div>
       <p className="mb-3.5 text-[12.5px] leading-relaxed text-muted-foreground">
-        Zostaw kontakt — odzywamy się do pierwszej pasującej osoby. Zapis nie
-        jest rezerwacją.
+        {t("wl.text")}
       </p>
 
       <div className="flex flex-col gap-[11px]">
@@ -179,7 +194,7 @@ export function WaitlistForm({
               htmlFor="waitlist-time"
               className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
             >
-              Preferowana godzina
+              {t("wl.preferredTime")}
             </label>
             <select
               id="waitlist-time"
@@ -199,7 +214,7 @@ export function WaitlistForm({
               htmlFor="waitlist-flex"
               className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
             >
-              Tolerancja
+              {t("wl.tolerance")}
             </label>
             <select
               id="waitlist-flex"
@@ -218,7 +233,9 @@ export function WaitlistForm({
 
         {data.user ? (
           <p className="text-[12px] text-muted-foreground">
-            Zapisujemy Cię jako {data.user.name ?? "zalogowanego gościa"}.
+            {t("wl.signedAs", {
+              name: data.user.name ?? t("wl.loggedGuest"),
+            })}
           </p>
         ) : (
           <>
@@ -227,7 +244,7 @@ export function WaitlistForm({
                 htmlFor="waitlist-name"
                 className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
               >
-                Imię i nazwisko
+                {t("form.fullName")}
               </label>
               <input
                 id="waitlist-name"
@@ -243,7 +260,7 @@ export function WaitlistForm({
                   htmlFor="waitlist-phone"
                   className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
                 >
-                  Telefon
+                  {t("form.phone")}
                 </label>
                 <input
                   id="waitlist-phone"
@@ -260,7 +277,7 @@ export function WaitlistForm({
                   htmlFor="waitlist-email"
                   className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
                 >
-                  E-mail
+                  {t("form.email")}
                 </label>
                 <input
                   id="waitlist-email"
@@ -289,7 +306,7 @@ export function WaitlistForm({
         disabled={submitting}
         className="mt-3.5 min-h-11 w-full rounded-full bg-primary px-4 text-[13px] font-bold text-primary-foreground disabled:opacity-60"
       >
-        {submitting ? "Zapisuję…" : "Zapisz mnie na listę"}
+        {submitting ? t("wl.submitting") : t("wl.submit")}
       </button>
     </div>
   );

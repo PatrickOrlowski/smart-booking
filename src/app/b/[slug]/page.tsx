@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { env } from "@/lib/env";
 import { getCurrentUser } from "@/lib/authz";
 import { getNearestSlot } from "@/lib/availability-data";
+import { getRestaurantLocation } from "@/lib/restaurant-data";
 import {
   Tabs,
   TabsContent,
@@ -26,6 +27,8 @@ import {
   openStatus,
   priceLabel,
 } from "@/components/marketplace/format";
+import { LocaleProvider } from "@/i18n/client";
+import { getTranslations } from "@/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -84,17 +87,21 @@ export async function generateMetadata({
   });
   if (!business) return {};
 
+  const { t } = await getTranslations();
   const isRestaurant = business.type === "RESTAURANT";
   const city = business.locations[0]?.city;
-  const suffix = isRestaurant ? "rezerwacja stolika" : "rezerwacja online";
+  const suffix = isRestaurant
+    ? t("profile.meta.suffixRestaurant")
+    : t("profile.meta.suffixSalon");
   const title = city
     ? `${business.name} — ${cityDisplay(city)} | ${suffix}`
     : `${business.name} | ${suffix}`;
+  const where = city ? ` — ${business.name}, ${cityDisplay(city)}` : "";
   const description =
     business.description?.slice(0, 160) ??
     (isRestaurant
-      ? `Zarezerwuj stolik online${city ? ` — ${business.name}, ${cityDisplay(city)}` : ""}. Sprawdź godziny, strefy i opinie.`
-      : `Sprawdź cennik, zespół i opinie${city ? ` — ${business.name}, ${cityDisplay(city)}` : ""}. Zarezerwuj wizytę online.`);
+      ? t("profile.meta.descRestaurant", { where })
+      : t("profile.meta.descSalon", { where }));
   const url = `${env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")}/b/${slug}`;
 
   return {
@@ -120,7 +127,13 @@ export default async function BusinessProfilePage({
     select: { type: true },
   });
   if (!kind) notFound();
-  if (kind.type === "RESTAURANT") return <RestaurantProfile slug={slug} />;
+  if (kind.type === "RESTAURANT") {
+    // Restauracja bez kompletu konfiguracji (brak czynnej lokalizacji albo
+    // technicznej usługi TABLE_RESERVATION) nie ma czego pokazać w widgecie
+    // rezerwacji — zamiast twardego 404 spada do profilu ogólnego niżej.
+    const context = await getRestaurantLocation(slug);
+    if (context) return <RestaurantProfile slug={slug} context={context} />;
+  }
 
   const business = await prisma.business.findFirst({
     where: { slug, status: "ACTIVE" },
@@ -200,8 +213,9 @@ export default async function BusinessProfilePage({
 
   if (!business || business.locations.length === 0) notFound();
 
+  const { locale, t } = await getTranslations();
   const location = business.locations[0];
-  const status = openStatus(location.openingHours, location.timezone);
+  const status = openStatus(location.openingHours, location.timezone, locale);
 
   // Ulubione — serce na profilu; dla niezalogowanego zawsze puste.
   const user = await getCurrentUser();
@@ -217,7 +231,7 @@ export default async function BusinessProfilePage({
   // Najbliższy wolny termin — pastylka w sticky karcie „Zarezerwuj" (lg+).
   const nearestSlot = await getNearestSlot(business.slug).catch(() => null);
   const nearestLabel = nearestSlot
-    ? nearestSlotLabel(nearestSlot.startAt, nearestSlot.timezone)
+    ? nearestSlotLabel(nearestSlot.startAt, nearestSlot.timezone, locale)
     : null;
 
   const reviews = business.reviews;
@@ -240,8 +254,11 @@ export default async function BusinessProfilePage({
           (sum, group) => sum + group.rating * group._count._all,
           0,
         ) / reviewsTotal;
+  const decimalSeparator = locale === "pl" ? "," : ".";
   const ratingScore =
-    averageRating === null ? "5,0" : averageRating.toFixed(1).replace(".", ",");
+    averageRating === null
+      ? `5${decimalSeparator}0`
+      : averageRating.toFixed(1).replace(".", decimalSeparator);
 
   // Rozkład ocen 1–5 do pasków w nagłówku zakładki Opinie.
   const ratingDistribution = [5, 4, 3, 2, 1].map((stars) => {
@@ -309,37 +326,37 @@ export default async function BusinessProfilePage({
     })),
     {
       id: "bez-kategorii",
-      name: "Pozostałe",
+      name: t("profile.otherCategory"),
       services: business.services.filter((service) => !service.categoryId),
     },
   ].filter((group) => group.services.length > 0);
 
   return (
-    <>
+    <LocaleProvider locale={locale}>
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{
           __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c"),
         }}
       />
-      <SiteHeader />
+      <SiteHeader locale={locale} />
       <main className="mx-auto w-full max-w-md pb-16 md:max-w-3xl md:px-5 lg:max-w-6xl lg:px-8 lg:pt-6">
       <div className="mb-5 hidden lg:block">
         <Link
           href="/"
           className="text-[13px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
         >
-          ← Wyniki
+          ← {t("profile.backResults")}
         </Link>
       </div>
 
       <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start lg:gap-12">
       <div className="min-w-0">
       <div className="photo-placeholder relative flex h-[180px] items-center justify-center font-mono text-[10px] tracking-[0.08em] text-[#8f8b81] md:mt-5 md:h-[240px] md:rounded-2xl lg:mt-0 lg:h-[280px]">
-        GALERIA
+        {t("common.gallery")}
         <Link
           href="/"
-          aria-label="Wróć do wyszukiwarki"
+          aria-label={t("profile.backToSearch")}
           className="absolute top-3 left-3.5 flex size-[34px] items-center justify-center rounded-full border-[1.5px] border-border-strong bg-card text-sm lg:hidden"
         >
           ←
@@ -381,19 +398,19 @@ export default async function BusinessProfilePage({
             className="h-auto w-full justify-start gap-5 rounded-none border-b border-[#e2ddd2] p-0"
           >
             <TabsTrigger value="uslugi" className={tabTriggerClass}>
-              Usługi
+              {t("profile.tab.services")}
             </TabsTrigger>
             <TabsTrigger value="zespol" className={tabTriggerClass}>
-              Zespół
+              {t("profile.tab.team")}
             </TabsTrigger>
             <TabsTrigger value="opinie" className={tabTriggerClass}>
-              Opinie{" "}
+              {t("profile.tab.reviews")}{" "}
               <span className="font-mono text-[11px] font-medium text-muted-foreground">
 
               </span>
             </TabsTrigger>
             <TabsTrigger value="info" className={tabTriggerClass}>
-              Info
+              {t("profile.tab.info")}
             </TabsTrigger>
           </TabsList>
 
@@ -421,6 +438,7 @@ export default async function BusinessProfilePage({
                               service.priceCents,
                               service.priceType,
                               service.currency,
+                              locale,
                             )}
                           </div>
                         </div>
@@ -429,11 +447,11 @@ export default async function BusinessProfilePage({
                             href={`/b/${business.slug}/rezerwacja?serviceId=${service.id}`}
                             className="flex-none rounded-full border-[1.5px] border-border-strong bg-card px-4 py-[9px] text-[13px] font-semibold"
                           >
-                            Wybierz
+                            {t("common.select")}
                           </Link>
                         ) : (
                           <span className="flex-none rounded-full border-[1.5px] border-border bg-card px-4 py-[9px] text-[13px] font-semibold text-muted-foreground">
-                            Zapytaj
+                            {t("profile.ask")}
                           </span>
                         )}
                       </div>
@@ -464,7 +482,7 @@ export default async function BusinessProfilePage({
               ))}
               {location.resources.length === 0 ? (
                 <p className="text-[13px] text-muted-foreground">
-                  Zespół nie został jeszcze uzupełniony.
+                  {t("profile.teamEmpty")}
                 </p>
               ) : null}
             </div>
@@ -477,6 +495,7 @@ export default async function BusinessProfilePage({
               ratingScore={ratingScore}
               distribution={ratingDistribution}
               timezone={location.timezone}
+              locale={locale}
             />
           </TabsContent>
 
@@ -489,7 +508,7 @@ export default async function BusinessProfilePage({
               ) : null}
 
               <div className="rounded-2xl border border-border bg-card p-4">
-                <div className="meta-label mb-2">Adres</div>
+                <div className="meta-label mb-2">{t("profile.address")}</div>
                 <div className="text-sm font-semibold">
                   {location.addressLine1}
                 </div>
@@ -504,16 +523,23 @@ export default async function BusinessProfilePage({
               </div>
 
               <div className="rounded-2xl border border-border bg-card p-4">
-                <div className="meta-label mb-2">Godziny otwarcia</div>
-                <OpeningHoursList openingHours={location.openingHours} />
+                <div className="meta-label mb-2">
+                  {t("profile.openingHours")}
+                </div>
+                <OpeningHoursList
+                  openingHours={location.openingHours}
+                  locale={locale}
+                />
               </div>
 
               <div className="rounded-2xl border border-border bg-card p-4">
-                <div className="mb-1.5 text-xs font-bold">Zasady odwołania</div>
+                <div className="mb-1.5 text-xs font-bold">
+                  {t("profile.cancelPolicy")}
+                </div>
                 <p className="text-[11.5px] leading-relaxed text-foreground/80">
-                  Bezpłatnie do{" "}
-                  <b>{location.cancellationCutoffHours} h</b> przed wizytą.
-                  Później termin przepada.
+                  {t("profile.cancelPolicyText", {
+                    hours: location.cancellationCutoffHours,
+                  })}
                 </p>
               </div>
             </div>
@@ -526,7 +552,7 @@ export default async function BusinessProfilePage({
         <div className="rounded-2xl border-[1.5px] border-border-strong bg-card p-5">
           <div className="flex items-start justify-between gap-3">
             <h2 className="font-display text-xl font-bold tracking-tight">
-              Zarezerwuj
+              {t("profile.book")}
             </h2>
             <FavoriteButton
               businessId={business.id}
@@ -543,21 +569,25 @@ export default async function BusinessProfilePage({
             {status.label}
           </div>
 
-          <AvailabilityPill label={nearestLabel} className="mt-3.5" />
+          <AvailabilityPill
+            label={nearestLabel}
+            className="mt-3.5"
+            locale={locale}
+          />
 
           <a
             href="#cennik"
             className="mt-4 block w-full rounded-full bg-primary px-4 py-3 text-center text-sm font-bold text-primary-foreground"
           >
-            Zarezerwuj wizytę
+            {t("profile.bookVisit")}
           </a>
           <p className="mt-2 text-center text-[11px] text-[#8f8b81]">
-            Wybierz usługę z cennika, żeby zobaczyć terminy.
+            {t("profile.pickServiceHint")}
           </p>
 
           <div className="my-5 h-px bg-border" />
 
-          <div className="meta-label mb-2">Adres</div>
+          <div className="meta-label mb-2">{t("profile.address")}</div>
           <div className="text-sm font-semibold">{location.addressLine1}</div>
           <div className="text-[13px] text-muted-foreground">
             {location.postalCode} {location.city}
@@ -566,13 +596,16 @@ export default async function BusinessProfilePage({
             <div className="mt-1.5 font-mono text-[13px]">{location.phone}</div>
           ) : null}
 
-          <div className="meta-label mt-5 mb-2">Godziny otwarcia</div>
-          <OpeningHoursList openingHours={location.openingHours} />
+          <div className="meta-label mt-5 mb-2">{t("profile.openingHours")}</div>
+          <OpeningHoursList
+            openingHours={location.openingHours}
+            locale={locale}
+          />
         </div>
       </aside>
       </div>
       </main>
-      <SiteFooter />
-    </>
+      <SiteFooter locale={locale} />
+    </LocaleProvider>
   );
 }

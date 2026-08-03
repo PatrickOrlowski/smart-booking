@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import {
   getRestaurantLocation,
   partyTooLargeMessage,
+  partyTooSmallMessage,
   resolveTableSlot,
   type RestaurantContext,
 } from "@/lib/restaurant-data";
@@ -61,6 +62,7 @@ export type TableBookingError =
   | "NOT_FOUND"
   | "VALIDATION"
   | "PARTY_TOO_LARGE"
+  | "PARTY_TOO_SMALL"
   | "BOOKING_BLOCKED"
   | "SLOT_TAKEN"
   | "INTERNAL";
@@ -163,6 +165,29 @@ export async function createTableBooking(
   const maxOnline = context.location.maxPartySizeOnline;
   if (maxOnline !== null && input.partySize > maxOnline) {
     return fail(422, "PARTY_TOO_LARGE", partyTooLargeMessage(context));
+  }
+  // Dolna granica: żaden stolik nie ma tak niskiego `capacityMin`, więc
+  // silnik i tak nie znajdzie kandydata — to walidacja, nie wyścig o stolik.
+  if (input.partySize < context.minPartySizeSeatable) {
+    return fail(422, "PARTY_TOO_SMALL", partyTooSmallMessage(context));
+  }
+
+  // Wskazany stolik/zestawienie musi istnieć w TYM lokalu. Bez tego obce albo
+  // wymyślone id przechodziło przez `restrictTo` jako „zero kandydatów"
+  // i wracało jako 409 „stolik właśnie zajęty" zamiast błędu walidacji.
+  if (input.combinationId) {
+    const known = context.combinations.some(
+      (combination) => combination.id === input.combinationId,
+    );
+    if (!known) {
+      return fail(422, "VALIDATION", "Nie znaleziono wskazanego zestawienia stolików.");
+    }
+  }
+  if (input.tableIds && input.tableIds.length > 0) {
+    const known = new Set(context.tables.map((table) => table.id));
+    if (!input.tableIds.every((tableId) => known.has(tableId))) {
+      return fail(422, "VALIDATION", "Nie znaleziono wskazanego stolika.");
+    }
   }
 
   // Rewalidacja terminu: dostępność stolika, bufor sprzątania, godziny

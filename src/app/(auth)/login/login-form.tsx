@@ -6,6 +6,7 @@ import { useActionState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useTranslations } from "@/i18n/client";
 import { loginAction, type AuthFormState } from "./actions";
 
 const initialState: AuthFormState = { error: null };
@@ -14,16 +15,17 @@ const inputClassName =
   "h-auto rounded-xl border-[1.5px] border-border-strong bg-card px-3.5 py-3 text-sm md:text-sm";
 
 export function LoginForm() {
+  const { t } = useTranslations();
   const [state, formAction, pending] = useActionState(loginAction, initialState);
 
   return (
     <div>
-      <div className="meta-label">LOGOWANIE</div>
+      <div className="meta-label">{t("auth.login.label")}</div>
       <h1 className="mt-1.5 font-display text-[28px] leading-none font-extrabold tracking-tight md:text-[32px]">
-        Witaj z powrotem.
+        {t("auth.login.title")}
       </h1>
       <p className="mt-2 text-[13px] text-muted-foreground">
-        Zaloguj się, żeby zarządzać wizytami i rezerwacjami.
+        {t("auth.login.subtitle")}
       </p>
 
       <div className="mt-5 rounded-2xl border-[1.5px] border-border-strong bg-card p-5 sm:p-6">
@@ -42,7 +44,7 @@ export function LoginForm() {
               htmlFor="email"
               className="text-[11px] font-semibold text-muted-foreground"
             >
-              E-mail
+              {t("auth.email")}
             </Label>
             <Input
               id="email"
@@ -60,7 +62,7 @@ export function LoginForm() {
               htmlFor="password"
               className="text-[11px] font-semibold text-muted-foreground"
             >
-              Hasło
+              {t("auth.password")}
             </Label>
             <Input
               id="password"
@@ -79,18 +81,18 @@ export function LoginForm() {
             disabled={pending}
             className="mt-1 h-auto w-full rounded-full px-4 py-3 text-[14px] font-bold"
           >
-            {pending ? "Logowanie…" : "Zaloguj się"}
+            {pending ? t("auth.login.pending") : t("auth.login.submit")}
           </Button>
         </form>
       </div>
 
       <p className="mt-4 text-center text-[13px] text-muted-foreground">
-        Nie masz konta?{" "}
+        {t("auth.login.noAccount")}{" "}
         <Link
           href="/rejestracja"
           className="font-semibold text-foreground underline underline-offset-4"
         >
-          Zarejestruj się
+          {t("auth.login.registerLink")}
         </Link>
       </p>
     </div>

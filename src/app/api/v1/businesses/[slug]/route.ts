@@ -26,7 +26,10 @@ export async function GET(
         select: { id: true, name: true, sortOrder: true },
       },
       services: {
-        where: { isActive: true },
+        // `TABLE_RESERVATION` to techniczny nośnik rezerwacji stolika —
+        // nigdy nie jest pozycją cennika (klient API wyrenderowałby ją jako
+        // usługę, a POST /api/v1/bookings i tak nie ma dla niej zasobów).
+        where: { isActive: true, kind: "STANDARD" },
         orderBy: { sortOrder: "asc" },
         select: {
           id: true,

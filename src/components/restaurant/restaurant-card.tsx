@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { cityDisplay } from "@/app/m/miasta";
+import { DEFAULT_LOCALE, createTranslator, type Locale } from "@/i18n";
 import { RestaurantSlotPill } from "./restaurant-slot-pill";
 import { TableSlotBadge } from "./table-slot-badge";
 
@@ -26,12 +27,15 @@ export function RestaurantCard({
   business,
   promoted = false,
   slotLabel,
+  locale = DEFAULT_LOCALE,
 }: {
   business: RestaurantCardData;
   promoted?: boolean;
   /** Pominięcie propsa włącza doliczenie po stronie klienta. */
   slotLabel?: string | null;
+  locale?: Locale;
 }) {
+  const t = createTranslator(locale);
   const location = business.locations[0];
   const address = location
     ? `${location.addressLine1}, ${cityDisplay(location.city)}`
@@ -46,7 +50,7 @@ export function RestaurantCard({
         variant={variant}
       />
     ) : (
-      <TableSlotBadge label={slotLabel} variant={variant} />
+      <TableSlotBadge label={slotLabel} variant={variant} locale={locale} />
     );
 
   if (promoted) {
@@ -56,7 +60,7 @@ export function RestaurantCard({
         className="block overflow-hidden rounded-2xl border-[1.5px] border-border-strong bg-card md:flex md:flex-col"
       >
         <div className="photo-placeholder flex h-28 flex-none items-center justify-center font-mono text-[10px] tracking-[0.08em] text-[#8f8b81]">
-          ZDJĘCIE LOKALU 16:9
+          {t("common.photo169")}
         </div>
         <div className="px-[15px] pt-[13px] pb-[15px] md:flex md:flex-1 md:flex-col">
           <div className="flex items-start justify-between gap-2.5">
@@ -69,7 +73,7 @@ export function RestaurantCard({
             </div>
           </div>
           <div className="mt-[3px] text-xs text-muted-foreground">
-            {address} · restauracja
+            {address} · {t("rest.restaurant")}
           </div>
           <div className="mt-[11px] md:mt-auto md:pt-[11px]">{slot("pill")}</div>
         </div>
@@ -84,7 +88,7 @@ export function RestaurantCard({
     >
       <div className="photo-placeholder flex size-[62px] flex-none items-center justify-center rounded-xl md:h-28 md:w-full md:rounded-none">
         <span className="hidden font-mono text-[10px] tracking-[0.08em] text-[#8f8b81] md:block">
-          ZDJĘCIE LOKALU
+          {t("common.photo")}
         </span>
       </div>
       <div className="min-w-0 md:flex md:flex-1 md:flex-col md:px-[15px] md:pt-[13px] md:pb-[15px]">

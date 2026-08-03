@@ -305,6 +305,61 @@ lokalizacji zamiast urządzenia). Typecheck web i mobile czyste.
 > na 390/768/1024/1440 — patrz `design/DESIGN.md`, sekcja Responsywność).
 > Zmiany w `/api/v1` nie muszą być kompatybilne wstecz z `mobile/`.
 
+**Faza 7 — ZROBIONA (01.08.2026).** Rezerwacja stolików. Kluczowa decyzja: rezerwacja
+stolika to zwykły `Booking` z `partySize` + `BookingItem` na każdym zajmowanym stoliku,
+więc istniejące ograniczenie `booking_items_no_overlap` chroni je bez nowego mechanizmu
+(zestawienie stolików = pozycja na każdym z nich). Zakres: silnik dostępności stolików
+(turn time per liczba osób, dobór najmniejszego pasującego, fallback na zestawienie,
+pacing, bufor sprzątania, DST), publiczny profil restauracji i flow `/b/[slug]/stolik`,
+panel sal z edytorem planu (drag & drop, walidacja kolizji), widok hosta „Dziś" z planem
+na żywo i listą oczekujących.
+
+Weryfikacja adwersaryjna: **41 findingów, 32 naprawione.** Najważniejsze:
+- restauracja z kreatora nie dostawała usługi `TABLE_RESERVATION` → publiczny profil
+  dawał 404 (critical)
+- usługa techniczna wyciekała do cennika w panelu i do publicznego API — jej wyłączenie
+  wywalało cały tor rezerwacji; teraz filtr `kind: STANDARD` + guard w akcjach
+- restauracje raportowały „od 0 zł" na listingach (cena z usługi technicznej)
+- grupa mniejsza niż najmniejszy stolik dostawała „brak wolnych stolików na 2 tygodnie"
+  zamiast „nie sadzamy pojedynczych gości" → `PARTY_TOO_SMALL`
+- mail potwierdzenia przy zestawieniu: „Rezerwacja stolika + Rezerwacja stolika",
+  „Pracownik: Stolik 1, Stolik 2" → wariant restauracyjny „Stolik dla N osób"
+
+Testy: 108 zielonych.
+
+**Faza 8 — ZROBIONA (03.08.2026, bez RODO — wyłączone przez użytkownika).**
+Zakres: kody rabatowe (atomowe limity użyć w transakcji rezerwacji) i karnety
+(sprzedaż + wykorzystanie wejść), panel admina `/admin` (weryfikacja firm, moderacja
+opinii, zgłoszenia nadużyć, użytkownicy z bezpiecznikiem „ostatniego admina"),
+rezerwacje cykliczne `/panel/serie` (planowanie dat odporne na DST, kolizja pomija
+termin zamiast przerywać serię), publiczne API `/api/public/v1` z kluczami (hash,
+pełny klucz pokazywany raz), webhooki z podpisem HMAC i retry z backoffem przez cron,
+widget `/widget/[slug]` do osadzenia w iframe, PL/EN na części publicznej (własny
+lekki mechanizm, panele zostają po polsku), ceny przez Intl z waluty firmy.
+
+Weryfikacja adwersaryjna (3 rundy przez limity sesji, cache wznowień): **23 findingi,
+13 do naprawy — 12 naprawionych, 1 świadomie odrzucony** (kod rabatowy odwołanej
+rezerwacji nadal zużywa limit — decyzja anty-abuse, udokumentowana). Najważniejsze:
+- anulowanie wizyty opłaconej karnetem nie zwracało wejścia → `refundPackageEntryForBooking`
+  we wszystkich czterech ścieżkach anulowania
+- właściciel zgłoszonej firmy widział w `/panel/aktywnosc` notatkę moderatora
+  i tożsamość admina → notatka poza metadata, aktor platformy jako „Planner"
+- przywrócenie zawieszonego szkicu wpuszczało go na marketplace ze stemplem weryfikacji
+  → powrót do statusu sprzed zawieszenia (z AuditLog)
+- wyścig dwóch adminów degradujących się nawzajem → transakcja Serializable
+- klucz API zawieszonej firmy przestał działać (403 BUSINESS_SUSPENDED)
+
+Testy: 158 zielonych. Smoke test na żywo: admin (kontrola dostępu potwierdzona
+— właściciel firmy odbity na /login), promocje, serie, integracje, widget 400px,
+strona główna po angielsku.
+Migracja `platform_maturity` wdrożona: `DiscountCode`/`DiscountRedemption`,
+`ServicePackage`/`CustomerPackage`/`PackageUsage`, `BookingSeries`, `AbuseReport`,
+`Webhook`/`WebhookDelivery`, `ApiKey`; weryfikacja firmy i `defaultLocale`/`currency`
+na `Business`, `locale` na `User`, rabat/karnet/seria na `Booking`.
+Zakres implementacji (bez RODO — wyłączone przez użytkownika 01.08.2026):
+panel admina platformy, kody rabatowe i karnety, rezerwacje cykliczne,
+publiczne API z webhookami i widgetem, PL/EN na części publicznej.
+
 ## 5b. Kolejne kroki
 
 1. Deploy na Vercel (env: DATABASE_URL, DIRECT_URL, AUTH_SECRET, CRON_SECRET, opcjonalnie

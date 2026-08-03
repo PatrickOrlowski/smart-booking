@@ -1,7 +1,14 @@
+import {
+  DEFAULT_LOCALE,
+  INTL_LOCALE,
+  createPluralTranslator,
+  createTranslator,
+  type Locale,
+} from "@/i18n";
+
 /**
  * Zakładka „Opinie" profilu firmy: nagłówek ze średnią i rozkładem ocen,
- * lista opinii z odpowiedziami właściciela. Wspólna dla salonu i restauracji —
- * markup jest dokładnie ten, który wcześniej żył w `app/b/[slug]/page.tsx`.
+ * lista opinii z odpowiedziami właściciela. Wspólna dla salonu i restauracji.
  */
 
 export type ProfileReview = {
@@ -20,23 +27,27 @@ export type RatingDistributionRow = {
   percent: number;
 };
 
-/** "1 opinia" / "3 opinie" / "12 opinii". */
-export function reviewsCountLabel(count: number): string {
-  if (count === 1) return "1 opinia";
-  const mod10 = count % 10;
-  const mod100 = count % 100;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
-    return `${count} opinie`;
-  }
-  return `${count} opinii`;
+/** "1 opinia" / "3 opinie" / "12 opinii" — Intl.PluralRules. */
+export function reviewsCountLabel(
+  count: number,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return createPluralTranslator(locale)("plural.reviews", count);
 }
 
 /** Gwiazdki 1–5 — wypełnione atramentem, reszta w kolorze obramowań. */
-export function Stars({ rating }: { rating: number }) {
+export function Stars({
+  rating,
+  locale = DEFAULT_LOCALE,
+}: {
+  rating: number;
+  locale?: Locale;
+}) {
+  const t = createTranslator(locale);
   return (
     <span
       role="img"
-      aria-label={`Ocena ${rating} na 5`}
+      aria-label={t("reviews.ratingAria", { rating })}
       className="font-mono text-[13px] tracking-[0.15em]"
     >
       <span>{"★".repeat(rating)}</span>
@@ -51,8 +62,9 @@ export function ReviewsSection({
   ratingScore,
   distribution,
   timezone,
-  emptyTitle = "Jeszcze brak opinii.",
-  emptyText = "Opinię można wystawić po zakończonej wizycie — bądź pierwszą osobą, która oceni to miejsce.",
+  locale = DEFAULT_LOCALE,
+  emptyTitle,
+  emptyText,
 }: {
   /** Najnowsze opinie do wyrenderowania (średnia idzie z agregatu). */
   reviews: ProfileReview[];
@@ -60,11 +72,13 @@ export function ReviewsSection({
   ratingScore: string;
   distribution: RatingDistributionRow[];
   timezone: string;
+  locale?: Locale;
   emptyTitle?: string;
   emptyText?: string;
 }) {
+  const t = createTranslator(locale);
   const reviewDateLabel = (date: Date) =>
-    new Intl.DateTimeFormat("pl-PL", {
+    new Intl.DateTimeFormat(INTL_LOCALE[locale], {
       timeZone: timezone,
       day: "numeric",
       month: "long",
@@ -75,10 +89,10 @@ export function ReviewsSection({
     return (
       <div className="mx-auto max-w-md py-12 text-center">
         <h2 className="mb-2 font-display text-[24px] leading-tight font-extrabold tracking-tight">
-          {emptyTitle}
+          {emptyTitle ?? t("reviews.emptyTitle")}
         </h2>
         <p className="mx-auto max-w-[280px] text-[13px] leading-relaxed text-muted-foreground">
-          {emptyText}
+          {emptyText ?? t("reviews.emptyTextSalon")}
         </p>
       </div>
     );
@@ -92,7 +106,7 @@ export function ReviewsSection({
             {ratingScore}
           </div>
           <div className="mt-1.5 font-mono text-[11px] text-muted-foreground">
-            {reviewsCountLabel(total)}
+            {reviewsCountLabel(total, locale)}
           </div>
         </div>
         <div className="flex min-w-0 flex-1 flex-col gap-[7px]">
@@ -123,14 +137,14 @@ export function ReviewsSection({
           >
             <div className="flex items-baseline justify-between gap-3">
               <div className="min-w-0 truncate text-[14px] font-bold">
-                {review.author.name ?? "Klient"}
+                {review.author.name ?? t("reviews.client")}
               </div>
               <div className="flex-none font-mono text-[11px] text-muted-foreground">
                 {reviewDateLabel(review.createdAt)}
               </div>
             </div>
             <div className="mt-0.5">
-              <Stars rating={review.rating} />
+              <Stars rating={review.rating} locale={locale} />
             </div>
             {review.comment ? (
               <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/80">
@@ -140,7 +154,7 @@ export function ReviewsSection({
             {review.reply ? (
               <div className="mt-3 ml-4 rounded-r-xl border-l-2 border-border-strong bg-muted/60 py-2.5 pr-3.5 pl-3.5">
                 <div className="flex items-baseline justify-between gap-3">
-                  <div className="meta-label">Odpowiedź właściciela</div>
+                  <div className="meta-label">{t("reviews.ownerReply")}</div>
                   {review.repliedAt ? (
                     <div className="flex-none font-mono text-[10px] text-muted-foreground">
                       {reviewDateLabel(review.repliedAt)}
@@ -157,7 +171,7 @@ export function ReviewsSection({
       </div>
       {total > reviews.length ? (
         <p className="border-t border-muted pt-4 text-[12.5px] text-muted-foreground">
-          Pokazujemy {reviews.length} najnowszych opinii z {total}.
+          {t("reviews.showingOf", { shown: reviews.length, total })}
         </p>
       ) : null}
     </>

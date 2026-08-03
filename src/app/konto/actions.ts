@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/authz";
 import { cancelBooking } from "@/lib/booking-cancel";
 import { isUniqueConstraintError } from "@/lib/prisma-errors";
+import { getTranslations } from "@/i18n/server";
 import { isReviewable } from "./booking-status";
 
 /**
@@ -28,9 +29,10 @@ export type KontoActionResult = { ok: true } | { ok: false; error: string };
 export async function cancelBookingAction(
   bookingId: string,
 ): Promise<KontoActionResult> {
+  const { t } = await getTranslations();
   const user = await getCurrentUser();
   if (!user) {
-    return { ok: false, error: "Zaloguj się, żeby anulować wizytę." };
+    return { ok: false, error: t("konto.error.loginToCancel") };
   }
 
   const result = await cancelBooking({
@@ -38,13 +40,16 @@ export async function cancelBookingAction(
     actor: { kind: "user", userId: user.id },
   });
   if (!result.ok) {
-    // Cudza rezerwacja ma w koncie wyglądać jak nieistniejąca.
+    // Cudza rezerwacja ma w koncie wyglądać jak nieistniejąca; pozostałe kody
+    // błędów mają swoje klucze w słowniku (komunikaty silnika są polskie).
     return {
       ok: false,
       error:
-        result.error === "FORBIDDEN"
-          ? "Nie znaleziono rezerwacji."
-          : result.message,
+        result.error === "FORBIDDEN" || result.error === "NOT_FOUND"
+          ? t("err.NOT_FOUND")
+          : result.error === "CUTOFF_PASSED"
+            ? t("err.CUTOFF_PASSED")
+            : t("err.INVALID_STATE"),
     };
   }
 
@@ -64,14 +69,15 @@ export async function createReviewAction(input: {
   rating: number;
   comment: string;
 }): Promise<KontoActionResult> {
+  const { t } = await getTranslations();
   const user = await getCurrentUser();
   if (!user) {
-    return { ok: false, error: "Zaloguj się, żeby ocenić wizytę." };
+    return { ok: false, error: t("konto.error.loginToReview") };
   }
 
   const parsed = reviewSchema.safeParse(input);
   if (!parsed.success) {
-    return { ok: false, error: "Wybierz ocenę od 1 do 5 gwiazdek." };
+    return { ok: false, error: t("konto.error.pickRating") };
   }
 
   const booking = await prisma.booking.findFirst({
@@ -85,13 +91,13 @@ export async function createReviewAction(input: {
     },
   });
   if (!booking) {
-    return { ok: false, error: "Nie znaleziono rezerwacji." };
+    return { ok: false, error: t("konto.error.bookingNotFound") };
   }
   if (!isReviewable(booking, new Date())) {
-    return { ok: false, error: "Ocenić można tylko zakończoną wizytę." };
+    return { ok: false, error: t("konto.error.onlyCompleted") };
   }
   if (booking.review) {
-    return { ok: false, error: "Ta wizyta ma już opinię." };
+    return { ok: false, error: t("konto.error.alreadyReviewed") };
   }
 
   try {
@@ -108,7 +114,7 @@ export async function createReviewAction(input: {
     // Unikalne `bookingId` w bazie: dwie karty / podwójny klik nie mogą
     // wylecieć błędem runtime zamiast komunikatem w formularzu.
     if (isUniqueConstraintError(error)) {
-      return { ok: false, error: "Ta wizyta ma już opinię." };
+      return { ok: false, error: t("konto.error.alreadyReviewed") };
     }
     throw error;
   }

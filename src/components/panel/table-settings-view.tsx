@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { WEEKDAY_LABELS } from "@/components/panel/format";
+import { runAction } from "@/components/panel/run-action";
 import {
   minutesToTimeValue,
   timeValueToMinutes,
@@ -127,14 +128,16 @@ export function TableSettingsView({
       return;
     }
     startTransition(async () => {
-      const result = await saveRestaurantSettingsAction({
-        businessId,
-        locationId,
-        defaultTurnTimeMin,
-        tableBufferMin,
-        maxPartySizeOnline,
-        waitlistEnabled: form.waitlistEnabled,
-      });
+      const result = await runAction(() =>
+        saveRestaurantSettingsAction({
+          businessId,
+          locationId,
+          defaultTurnTimeMin,
+          tableBufferMin,
+          maxPartySizeOnline,
+          waitlistEnabled: form.waitlistEnabled,
+        }),
+      );
       if (result.ok) {
         toast.success("Zapisano ustawienia lokalu");
         router.refresh();
@@ -172,13 +175,15 @@ export function TableSettingsView({
       return;
     }
     startTransition(async () => {
-      const result = await saveTurnTimeRuleAction({
-        businessId,
-        locationId,
-        partySizeMin,
-        partySizeMax,
-        durationMin,
-      });
+      const result = await runAction(() =>
+        saveTurnTimeRuleAction({
+          businessId,
+          locationId,
+          partySizeMin,
+          partySizeMax,
+          durationMin,
+        }),
+      );
       if (result.ok) {
         toast.success("Reguła dodana");
         setTurnDraft({ partySizeMin: "", partySizeMax: "", durationMin: "" });
@@ -191,7 +196,9 @@ export function TableSettingsView({
 
   const removeTurnTimeRule = (ruleId: string) => {
     startTransition(async () => {
-      const result = await deleteTurnTimeRuleAction({ businessId, ruleId });
+      const result = await runAction(() =>
+        deleteTurnTimeRuleAction({ businessId, ruleId }),
+      );
       if (result.ok) {
         toast.success("Reguła usunięta");
         router.refresh();
@@ -233,17 +240,19 @@ export function TableSettingsView({
     }
 
     startTransition(async () => {
-      const result = await savePacingRuleAction({
-        businessId,
-        locationId,
-        weekday:
-          pacingDraft.weekday === "all" ? null : Number(pacingDraft.weekday),
-        startMinute,
-        endMinute,
-        intervalMin,
-        maxCovers,
-        maxBookings,
-      });
+      const result = await runAction(() =>
+        savePacingRuleAction({
+          businessId,
+          locationId,
+          weekday:
+            pacingDraft.weekday === "all" ? null : Number(pacingDraft.weekday),
+          startMinute,
+          endMinute,
+          intervalMin,
+          maxCovers,
+          maxBookings,
+        }),
+      );
       if (result.ok) {
         toast.success("Reguła pacingu dodana");
         setPacingDraft({ ...pacingDraft, maxCovers: "", maxBookings: "" });
@@ -256,7 +265,9 @@ export function TableSettingsView({
 
   const removePacingRule = (ruleId: string) => {
     startTransition(async () => {
-      const result = await deletePacingRuleAction({ businessId, ruleId });
+      const result = await runAction(() =>
+        deletePacingRuleAction({ businessId, ruleId }),
+      );
       if (result.ok) {
         toast.success("Reguła usunięta");
         router.refresh();

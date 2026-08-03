@@ -7,6 +7,8 @@ import { getRestaurantLocation } from "@/lib/restaurant-data";
 import { SiteHeader } from "@/components/marketplace/site-header";
 import { toBookingData } from "@/components/restaurant/serialize";
 import type { RestaurantBookingData } from "@/components/restaurant/types";
+import { LocaleProvider } from "@/i18n/client";
+import { getTranslations } from "@/i18n/server";
 import { TableFlow } from "./table-flow";
 
 export const dynamic = "force-dynamic";
@@ -29,10 +31,13 @@ export async function generateMetadata({
   const context = await getRestaurantLocation(slug);
   if (!context) return {};
 
-  const title = `Rezerwacja stolika — ${context.business.name} | Planner`;
+  const { t } = await getTranslations();
   return {
-    title,
-    description: `Zarezerwuj stolik w ${context.business.name} (${context.location.city}) — wybierz liczbę osób i godzinę, potwierdzenie od razu.`,
+    title: t("stolik.metaTitle", { name: context.business.name }),
+    description: t("stolik.metaDescription", {
+      name: context.business.name,
+      city: context.location.city,
+    }),
     alternates: {
       canonical: `${env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")}/b/${slug}/stolik`,
     },
@@ -47,6 +52,7 @@ export default async function TableBookingPage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
+  const { locale } = await getTranslations();
 
   const context = await getRestaurantLocation(slug);
   if (!context) notFound();
@@ -72,9 +78,9 @@ export default async function TableBookingPage({
   }
 
   return (
-    <>
-      <SiteHeader />
+    <LocaleProvider locale={locale}>
+      <SiteHeader locale={locale} />
       <TableFlow data={toBookingData(context, user)} />
-    </>
+    </LocaleProvider>
   );
 }

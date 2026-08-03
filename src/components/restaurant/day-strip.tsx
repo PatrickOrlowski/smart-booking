@@ -1,6 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import { useTranslations } from "@/i18n/client";
 
 /**
  * Pasek dni lokalnych lokalu (domyślnie 14). Przewija się we własnym
@@ -25,10 +26,11 @@ export function DayStrip({
   onSelect: (iso: string) => void;
   className?: string;
 }) {
+  const { t } = useTranslations();
   return (
     <div
       role="group"
-      aria-label="Wybór dnia"
+      aria-label={t("common.dayPicker")}
       className={cn("-mx-5 flex gap-2 overflow-x-auto px-5 pb-1.5", className)}
     >
       {days.map((day) => {
@@ -52,7 +54,7 @@ export function DayStrip({
                 active ? "text-primary-foreground/70" : "text-[#8f8b81]",
               )}
             >
-              {day.isToday ? "dziś" : day.weekday}
+              {day.isToday ? t("common.today") : day.weekday}
             </div>
             <div className="mt-0.5 font-mono text-[17px] font-medium">
               {day.dayNumber}

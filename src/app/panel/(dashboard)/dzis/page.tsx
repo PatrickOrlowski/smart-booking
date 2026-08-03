@@ -44,6 +44,33 @@ import type {
 
 const DAY_MIN = 24 * 60;
 
+type OpenWindow = { openMin: number; closeMin: number };
+
+/**
+ * Rozłączne okna otwarcia dnia (lunch + kolacja to DWA okna, nie jedno).
+ * Ta sama zasada co `openWindows` w dzis/actions.ts — walk-in nie może
+ * wypaść w przerwie, w której lokal nie obsługuje gości.
+ */
+function mergeOpenWindows(
+  blocks: { startMinute: number; endMinute: number }[],
+): OpenWindow[] {
+  const sorted = blocks
+    .map((block) => ({ openMin: block.startMinute, closeMin: block.endMinute }))
+    .filter((block) => block.closeMin > block.openMin)
+    .sort((a, b) => a.openMin - b.openMin);
+
+  const merged: OpenWindow[] = [];
+  for (const block of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && block.openMin <= last.closeMin) {
+      last.closeMin = Math.max(last.closeMin, block.closeMin);
+    } else {
+      merged.push({ ...block });
+    }
+  }
+  return merged;
+}
+
 export default async function HostTodayPage({
   searchParams,
 }: {
@@ -81,11 +108,12 @@ export default async function HostTodayPage({
     (block) => block.weekday === weekday,
   );
   const isOpen = openBlocks.length > 0;
-  const openMin = isOpen
-    ? Math.min(...openBlocks.map((block) => block.startMinute))
-    : 12 * 60;
+  const openWindowsToday = mergeOpenWindows(openBlocks);
+  // Oś czasu planu sali obejmuje CAŁY dzień pracy (od pierwszego otwarcia do
+  // ostatniego zamknięcia) — przerwy widać jako puste miejsca na osi.
+  const openMin = isOpen ? openWindowsToday[0].openMin : 12 * 60;
   const closeMin = isOpen
-    ? Math.max(...openBlocks.map((block) => block.endMinute))
+    ? openWindowsToday[openWindowsToday.length - 1].closeMin
     : 22 * 60;
 
   const dayStartUtc = localDayMinutesToUtc(day, 0, tz);
@@ -208,12 +236,8 @@ export default async function HostTodayPage({
     })),
     ...(orphanTables.length > 0
       ? [
-          {
-            id: "bez-sali",
-            name: "Bez sali",
-            gridWidth: 20,
-            gridHeight: 14,
-            tables: orphanTables.map((table) => ({
+          (() => {
+            const tables = orphanTables.map((table) => ({
               id: table.id,
               number: table.tableNumber ?? table.name,
               name: table.name,
@@ -225,8 +249,27 @@ export default async function HostTodayPage({
               posY: table.posY,
               spanX: table.spanX ?? 2,
               spanY: table.spanY ?? 2,
-            })),
-          },
+            }));
+            // Stoliki osierocone po skasowaniu sali zachowały `posX/posY`
+            // z poprzedniej, większej siatki. Sztywne 20×14 wypychało je poza
+            // kontener z `overflow-hidden` i host w ogóle ich nie widział —
+            // siatkę pseudo-sali liczymy więc z faktycznych pozycji.
+            const gridWidth = Math.max(
+              20,
+              ...tables.map((table) => (table.posX ?? 0) + table.spanX),
+            );
+            const gridHeight = Math.max(
+              14,
+              ...tables.map((table) => (table.posY ?? 0) + table.spanY),
+            );
+            return {
+              id: "bez-sali",
+              name: "Bez sali",
+              gridWidth,
+              gridHeight,
+              tables,
+            };
+          })(),
         ]
       : []),
   ];
@@ -274,8 +317,11 @@ export default async function HostTodayPage({
         booking.status === "COMPLETED",
       // Etykieta opisuje stan bieżący, nie historię: gdy rezerwacja wróciła
       // do PENDING/CONFIRMED, „posadzeni" byłoby kłamstwem.
+      // „Posadź" trzyma rezerwację w CONFIRMED (posadzenie ≠ zakończenie
+      // wizyty); COMPLETED przychodzi dopiero z rozliczenia w panelu.
       seatedAtLabel:
-        seatedAt && booking.status === "COMPLETED"
+        seatedAt &&
+        (booking.status === "CONFIRMED" || booking.status === "COMPLETED")
           ? formatMinutes(minutesInDay(seatedAt))
           : null,
     };
@@ -303,29 +349,61 @@ export default async function HostTodayPage({
     capacityMax: table.capacityMax,
   }));
 
-  // Stan stolików „teraz" na potrzeby dialogu walk-in (podgląd godziny
-  // w planie sali przestawia wyłącznie widok, nie tę listę).
+  // Okno walk-inu liczone dokładnie tak, jak robi to `createWalkInBookingAction`:
+  // bieżące okno otwarcia, a w przerwie/przed otwarciem — najbliższe następne.
+  const walkInWindow =
+    isToday && nowMin !== null
+      ? (openWindowsToday.find(
+          (block) => nowMin >= block.openMin && nowMin < block.closeMin,
+        ) ??
+        openWindowsToday.find((block) => block.openMin > nowMin) ??
+        null)
+      : null;
+  const walkInStartMin =
+    walkInWindow && nowMin !== null
+      ? Math.max(nowMin, walkInWindow.openMin)
+      : null;
+
+  // Stan stolików na CAŁE okno walk-inu, nie na jedną minutę. Rezerwacja
+  // zajmuje [start, start + turn time + bufor], więc stolik wolny „teraz",
+  // ale zarezerwowany za godzinę, musi być widoczny jako „wolny tylko do…";
+  // ostateczne dopasowanie robi dialog, bo turn time zależy od liczby osób.
   const walkInTables: WalkInTableOption[] = flatTables.map((table) => {
-    const minute = nowMin ?? -1;
-    const conflict = bookings.find(
+    const start = walkInStartMin ?? -1;
+    const current = bookings.find(
       (booking) =>
         booking.blocking &&
         booking.tableIds.includes(table.id) &&
-        booking.startMin <= minute &&
-        minute < booking.blockedEndMin,
+        booking.startMin <= start &&
+        start < booking.blockedEndMin,
     );
+    const nextStartMin = bookings
+      .filter(
+        (booking) =>
+          booking.blocking &&
+          booking.tableIds.includes(table.id) &&
+          booking.startMin > start,
+      )
+      .reduce<number | null>(
+        (earliest, booking) =>
+          earliest === null || booking.startMin < earliest
+            ? booking.startMin
+            : earliest,
+        null,
+      );
+
     return {
       id: table.id,
       number: table.number,
       roomName: table.roomName,
       capacityMin: table.capacityMin,
       capacityMax: table.capacityMax,
-      busy: conflict !== undefined,
-      busyLabel: conflict
-        ? conflict.endMin <= minute
-          ? `sprzątanie do ${formatMinutes(conflict.blockedEndMin)}`
-          : `zajęty do ${formatMinutes(conflict.endMin)}`
+      occupiedLabel: current
+        ? current.endMin <= start
+          ? `sprzątanie do ${formatMinutes(current.blockedEndMin)}`
+          : `zajęty do ${formatMinutes(current.endMin)}`
         : null,
+      freeUntilMin: nextStartMin,
     };
   });
 
@@ -353,8 +431,22 @@ export default async function HostTodayPage({
         : entry.status === "NOTIFIED"
           ? "notified"
           : "waiting",
+      // Termin odpowiedzi potrafi przekroczyć północ (host klika o 23:55) —
+      // `minutesInDay` przycinało to do 1440 i karta pokazywała „24:00".
+      // Formatujemy więc w strefie lokalu bez przycinania, a inną dobę
+      // sygnalizujemy datą.
       holdUntilLabel: entry.holdUntil
-        ? formatMinutes(minutesInDay(entry.holdUntil))
+        ? (() => {
+            const wall = utcToZonedWallClock(entry.holdUntil, tz);
+            const label = formatMinutes(wall.hour * 60 + wall.minute);
+            const sameDay =
+              wall.year === day.year &&
+              wall.month === day.month &&
+              wall.day === day.day;
+            return sameDay
+              ? label
+              : `${label} (${wall.day}.${String(wall.month).padStart(2, "0")})`;
+          })()
         : null,
     };
   });
@@ -379,12 +471,13 @@ export default async function HostTodayPage({
   );
   const dayTitle = rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1);
 
-  const walkInOpen =
-    isToday && isOpen && nowMin !== null && nowMin < closeMin;
+  const walkInOpen = walkInStartMin !== null;
   const walkInStartLabel =
-    nowMin !== null && nowMin >= openMin
-      ? `teraz (${formatMinutes(nowMin)})`
-      : `od otwarcia (${formatMinutes(openMin)})`;
+    walkInStartMin === null
+      ? "lokal zamknięty"
+      : nowMin !== null && walkInStartMin === nowMin
+        ? `teraz (${formatMinutes(nowMin)})`
+        : `od otwarcia (${formatMinutes(walkInStartMin)})`;
 
   return (
     <div className="flex flex-col">
@@ -449,6 +542,9 @@ export default async function HostTodayPage({
               tables={walkInTables}
               turnTimeRules={turnTimeRules}
               defaultTurnTimeMin={location.defaultTurnTimeMin}
+              tableBufferMin={location.tableBufferMin}
+              startMin={walkInStartMin}
+              closeMin={walkInWindow?.closeMin ?? null}
               startLabel={walkInStartLabel}
               disabled={!walkInOpen}
             />

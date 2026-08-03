@@ -1,12 +1,11 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { MapPin, Phone, Users } from "lucide-react";
 import { env } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/authz";
 import {
-  getRestaurantLocation,
   getTableAvailabilityRange,
+  type RestaurantContext,
 } from "@/lib/restaurant-data";
 import { addLocalDays, isoDateToLocalDate } from "@/lib/availability";
 import {
@@ -21,10 +20,13 @@ import { ReviewsSection } from "@/components/marketplace/reviews-section";
 import { SiteFooter } from "@/components/marketplace/site-footer";
 import { SiteHeader } from "@/components/marketplace/site-header";
 import { formatTimeInZone, openStatus } from "@/components/marketplace/format";
+import { INTL_LOCALE } from "@/i18n";
+import { LocaleProvider } from "@/i18n/client";
+import { getTranslations } from "@/i18n/server";
 import { AreaIcon } from "./area-icon";
 import {
-  GUEST_AREA_HINTS,
-  GUEST_AREA_LABELS,
+  guestAreaHint,
+  guestAreaLabel,
   localIsoDate,
   relativeDayLabel,
   turnTimeLabel,
@@ -69,11 +71,20 @@ const minutesToHHMM = (minutes: number) =>
 const tabTriggerClass =
   "flex-none px-0 text-[13px] font-medium text-[#8f8b81] data-active:font-bold data-active:text-foreground rounded-none border-0 pb-2 after:bottom-0 after:h-[2.5px]";
 
-export async function RestaurantProfile({ slug }: { slug: string }) {
-  const context = await getRestaurantLocation(slug);
-  if (!context) notFound();
-
+/**
+ * Kontekst restauracji przychodzi z `/b/[slug]` — strona i tak musi go
+ * policzyć, żeby wiedzieć, czy lokal ma komplet konfiguracji do rezerwacji
+ * stolika (bez niej spada do profilu ogólnego zamiast dawać 404).
+ */
+export async function RestaurantProfile({
+  slug,
+  context,
+}: {
+  slug: string;
+  context: RestaurantContext;
+}) {
   const { business, location } = context;
+  const { locale, t, tp } = await getTranslations();
   const now = new Date();
   const todayIso = localIsoDate(now, location.timezone);
   const today = isoDateToLocalDate(todayIso);
@@ -120,9 +131,15 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
       })) !== null
     : false;
 
-  const status = openStatus(location.openingHours, location.timezone, now);
+  const status = openStatus(
+    location.openingHours,
+    location.timezone,
+    locale,
+    now,
+  );
 
   // Rozkład ocen i średnia z agregatu po WSZYSTKICH opublikowanych opiniach.
+  const decimalSeparator = locale === "pl" ? "," : ".";
   const reviewsTotal = ratingGroups.reduce(
     (sum, group) => sum + group._count._all,
     0,
@@ -135,7 +152,9 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
           0,
         ) / reviewsTotal;
   const ratingScore =
-    averageRating === null ? "5,0" : averageRating.toFixed(1).replace(".", ",");
+    averageRating === null
+      ? `5${decimalSeparator}0`
+      : averageRating.toFixed(1).replace(".", decimalSeparator);
   const ratingDistribution = [5, 4, 3, 2, 1].map((stars) => {
     const count =
       ratingGroups.find((group) => group.rating === stars)?._count._all ?? 0;
@@ -166,6 +185,12 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
     const tables = context.tables.filter((table) => table.area === area);
     // Nazwa sali bywa tożsama z nazwą strefy („Taras" w strefie OUTDOOR) —
     // wtedy nie powtarzamy jej pod nagłówkiem, tylko dajemy podpowiedź.
+    // Porównujemy z etykietą polską (język danych właściciela) ORAZ aktywną.
+    const areaNames = new Set(
+      [guestAreaLabel(area, "pl"), guestAreaLabel(area, locale)].map((name) =>
+        name.toLowerCase(),
+      ),
+    );
     const rooms = [
       ...new Set(
         tables
@@ -174,10 +199,7 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
               context.rooms.find((room) => room.id === table.roomId)?.name,
           )
           .filter((name): name is string => name !== undefined)
-          .filter(
-            (name) =>
-              name.toLowerCase() !== GUEST_AREA_LABELS[area].toLowerCase(),
-          ),
+          .filter((name) => !areaNames.has(name.toLowerCase())),
       ),
     ];
     return {
@@ -238,9 +260,12 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
       target: {
         "@type": "EntryPoint",
         urlTemplate: `${profileUrl}/stolik`,
-        inLanguage: "pl-PL",
+        inLanguage: INTL_LOCALE[locale],
       },
-      result: { "@type": "FoodEstablishmentReservation", name: "Stolik" },
+      result: {
+        "@type": "FoodEstablishmentReservation",
+        name: t("rest.jsonLdReservation"),
+      },
     },
   };
 
@@ -249,42 +274,46 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
   const bookingData = toBookingData(context, null, now);
 
   const nearestLabel = nearest
-    ? `${relativeDayLabel(nearest.startAt, location.timezone, now)} ${formatTimeInZone(nearest.startAt, location.timezone)}`
+    ? `${relativeDayLabel(nearest.startAt, location.timezone, locale, now)} ${formatTimeInZone(nearest.startAt, location.timezone)}`
     : null;
 
   return (
-    <>
+    <LocaleProvider locale={locale}>
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{
           __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c"),
         }}
       />
-      <SiteHeader />
+      <SiteHeader locale={locale} />
       <main className="mx-auto w-full max-w-md pb-16 md:max-w-3xl md:px-5 lg:max-w-6xl lg:px-8 lg:pt-6">
         <div className="mb-5 hidden lg:block">
           <Link
             href="/"
             className="text-[13px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
           >
-            ← Wyniki
+            ← {t("profile.backResults")}
           </Link>
         </div>
 
         <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start lg:gap-12">
           <div className="min-w-0">
             <div className="photo-placeholder relative flex h-[180px] items-center justify-center font-mono text-[10px] tracking-[0.08em] text-[#8f8b81] md:mt-5 md:h-[240px] md:rounded-2xl lg:mt-0 lg:h-[280px]">
-              GALERIA WNĘTRZA
+              {t("rest.galleryInterior")}
               <Link
                 href="/"
-                aria-label="Wróć do wyszukiwarki"
+                aria-label={t("profile.backToSearch")}
                 className="absolute top-3 left-3.5 flex size-[34px] items-center justify-center rounded-full border-[1.5px] border-border-strong bg-card text-sm lg:hidden"
               >
                 ←
               </Link>
             </div>
             <div className="mt-2 hidden gap-2 px-5 md:grid md:grid-cols-3 md:px-0">
-              {["SALA", "TARAS", "KUCHNIA"].map((tile) => (
+              {[
+                t("rest.tile.room"),
+                t("rest.tile.terrace"),
+                t("rest.tile.kitchen"),
+              ].map((tile) => (
                 <div
                   key={tile}
                   className="photo-placeholder flex h-20 items-center justify-center rounded-xl font-mono text-[10px] tracking-[0.08em] text-[#8f8b81]"
@@ -335,13 +364,13 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                   className="h-auto w-full justify-start gap-5 rounded-none border-b border-[#e2ddd2] p-0"
                 >
                   <TabsTrigger value="rezerwacja" className={tabTriggerClass}>
-                    Rezerwacja
+                    {t("rest.tab.booking")}
                   </TabsTrigger>
                   <TabsTrigger value="opinie" className={tabTriggerClass}>
-                    Opinie
+                    {t("profile.tab.reviews")}
                   </TabsTrigger>
                   <TabsTrigger value="info" className={tabTriggerClass}>
-                    Info
+                    {t("profile.tab.info")}
                   </TabsTrigger>
                 </TabsList>
 
@@ -362,7 +391,7 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                   />
 
                   <section className="mt-6">
-                    <div className="meta-label mb-2">Strefy lokalu</div>
+                    <div className="meta-label mb-2">{t("rest.zones")}</div>
                     <div className="grid gap-2.5 sm:grid-cols-2">
                       {areaCards.map((card) => (
                         <div
@@ -374,50 +403,43 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                           </span>
                           <div className="min-w-0">
                             <div className="text-[14px] font-bold">
-                              {GUEST_AREA_LABELS[card.area]}
+                              {guestAreaLabel(card.area, locale)}
                             </div>
                             <div className="mt-0.5 text-[12px] text-muted-foreground">
                               {card.rooms.join(", ") ||
-                                GUEST_AREA_HINTS[card.area]}
+                                guestAreaHint(card.area, locale)}
                             </div>
                             <div className="mt-1 font-mono text-[11px] text-[#8f8b81]">
-                              {card.tables}{" "}
-                              {card.tables === 1 ? "stolik" : "stolików"} · do{" "}
-                              {card.seats} miejsc
+                              {tp("plural.tables", card.tables)} ·{" "}
+                              {t("rest.upToSeats", { seats: card.seats })}
                             </div>
                           </div>
                         </div>
                       ))}
                       {areaCards.length === 0 ? (
                         <p className="text-[13px] text-muted-foreground">
-                          Plan sali nie został jeszcze uzupełniony.
+                          {t("rest.floorPlanEmpty")}
                         </p>
                       ) : null}
                     </div>
                   </section>
 
                   <section className="mt-6 rounded-2xl border border-border bg-card p-4">
-                    <div className="meta-label mb-2">Jak rezerwujemy</div>
+                    <div className="meta-label mb-2">{t("rest.howWeBook")}</div>
                     <ul className="flex flex-col gap-2 text-[12.5px] leading-relaxed text-foreground/80">
                       <li className="flex gap-2">
                         <Users
                           aria-hidden
                           className="mt-0.5 size-4 flex-none text-muted-foreground"
                         />
-                        <span>
-                          Stolik dobieramy do liczby osób — nie wybierasz
-                          konkretnego numeru.
-                        </span>
+                        <span>{t("rest.how1")}</span>
                       </li>
                       <li className="flex gap-2">
                         <MapPin
                           aria-hidden
                           className="mt-0.5 size-4 flex-none text-muted-foreground"
                         />
-                        <span>
-                          Możesz zaznaczyć preferowaną strefę — pokażemy tylko
-                          godziny z wolnym stolikiem w tym miejscu.
-                        </span>
+                        <span>{t("rest.how2")}</span>
                       </li>
                       <li className="flex gap-2">
                         <Phone
@@ -425,9 +447,11 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                           className="mt-0.5 size-4 flex-none text-muted-foreground"
                         />
                         <span>
-                          Grupy powyżej{" "}
-                          {location.maxPartySizeOnline ?? "limitu online"} osób
-                          ustalamy telefonicznie.
+                          {t("rest.how3", {
+                            max:
+                              location.maxPartySizeOnline ??
+                              t("rest.onlineLimit"),
+                          })}
                         </span>
                       </li>
                     </ul>
@@ -441,7 +465,8 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                     ratingScore={ratingScore}
                     distribution={ratingDistribution}
                     timezone={location.timezone}
-                    emptyText="Opinię można wystawić po wizycie w lokalu — bądź pierwszą osobą, która oceni to miejsce."
+                    locale={locale}
+                    emptyText={t("reviews.emptyTextRestaurant")}
                   />
                 </TabsContent>
 
@@ -455,10 +480,12 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
 
                     <div className="overflow-hidden rounded-2xl border border-border bg-card">
                       <div className="photo-placeholder flex h-[140px] items-center justify-center font-mono text-[10px] tracking-[0.08em] text-[#8f8b81]">
-                        MAPA
+                        {t("rest.map")}
                       </div>
                       <div className="p-4">
-                        <div className="meta-label mb-2">Adres</div>
+                        <div className="meta-label mb-2">
+                          {t("profile.address")}
+                        </div>
                         <div className="text-sm font-semibold">
                           {location.addressLine1}
                         </div>
@@ -478,20 +505,24 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                     </div>
 
                     <div className="rounded-2xl border border-border bg-card p-4">
-                      <div className="meta-label mb-2">Godziny otwarcia</div>
-                      <OpeningHoursList openingHours={location.openingHours} />
+                      <div className="meta-label mb-2">
+                        {t("profile.openingHours")}
+                      </div>
+                      <OpeningHoursList
+                        openingHours={location.openingHours}
+                        locale={locale}
+                      />
                     </div>
 
                     <div className="rounded-2xl border border-border bg-card p-4">
                       <div className="mb-1.5 text-xs font-bold">
-                        Zasady odwołania
+                        {t("profile.cancelPolicy")}
                       </div>
                       <p className="text-[11.5px] leading-relaxed text-foreground/80">
-                        Rezerwację odwołasz bezpłatnie do{" "}
-                        <b>{location.cancellationCutoffHours} h</b> przed
-                        wizytą. Stolik trzymamy{" "}
-                        {turnTimeLabel(location.defaultTurnTimeMin)} od godziny
-                        rezerwacji.
+                        {t("rest.cancelPolicyText", {
+                          hours: location.cancellationCutoffHours,
+                          turn: turnTimeLabel(location.defaultTurnTimeMin),
+                        })}
                       </p>
                     </div>
                   </div>
@@ -504,7 +535,7 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
             <div className="rounded-2xl border-[1.5px] border-border-strong bg-card p-5">
               <div className="flex items-start justify-between gap-3">
                 <h2 className="font-display text-xl font-bold tracking-tight">
-                  Zarezerwuj stolik
+                  {t("rest.bookTable")}
                 </h2>
                 <FavoriteButton
                   businessId={business.id}
@@ -539,8 +570,8 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                   }
                 >
                   {nearestLabel
-                    ? `Wolny stolik dla 2 osób: ${nearestLabel}`
-                    : "Brak wolnych stolików w tym tygodniu"}
+                    ? t("rest.freeTableFor2", { label: nearestLabel })
+                    : t("badge.noneWeek")}
                 </span>
               </div>
 
@@ -548,15 +579,15 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                 href={`/b/${business.slug}/stolik`}
                 className="mt-4 flex min-h-11 w-full items-center justify-center rounded-full bg-primary px-4 text-sm font-bold text-primary-foreground"
               >
-                Rezerwuj stolik
+                {t("rest.bookTableCta")}
               </Link>
               <p className="mt-2 text-center text-[11px] text-[#8f8b81]">
-                Wybierz liczbę osób i godzinę — potwierdzenie od razu.
+                {t("rest.instantHint")}
               </p>
 
               <div className="my-5 h-px bg-border" />
 
-              <div className="meta-label mb-2">Adres</div>
+              <div className="meta-label mb-2">{t("profile.address")}</div>
               <div className="text-sm font-semibold">
                 {location.addressLine1}
               </div>
@@ -569,7 +600,7 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                 </div>
               ) : null}
 
-              <div className="meta-label mt-5 mb-2">Strefy</div>
+              <div className="meta-label mt-5 mb-2">{t("rest.zonesShort")}</div>
               <div className="flex flex-wrap gap-1.5">
                 {context.areas.map((area) => (
                   <span
@@ -577,18 +608,23 @@ export async function RestaurantProfile({ slug }: { slug: string }) {
                     className="flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[11.5px] font-semibold"
                   >
                     <AreaIcon area={area} className="size-3.5" />
-                    {GUEST_AREA_LABELS[area]}
+                    {guestAreaLabel(area, locale)}
                   </span>
                 ))}
               </div>
 
-              <div className="meta-label mt-5 mb-2">Godziny otwarcia</div>
-              <OpeningHoursList openingHours={location.openingHours} />
+              <div className="meta-label mt-5 mb-2">
+                {t("profile.openingHours")}
+              </div>
+              <OpeningHoursList
+                openingHours={location.openingHours}
+                locale={locale}
+              />
             </div>
           </aside>
         </div>
       </main>
-      <SiteFooter />
-    </>
+      <SiteFooter locale={locale} />
+    </LocaleProvider>
   );
 }

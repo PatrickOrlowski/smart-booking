@@ -20,6 +20,7 @@ import {
   PanelDialogContent,
 } from "@/components/panel/panel-dialog";
 import { cn } from "@/lib/utils";
+import { runAction } from "@/components/panel/run-action";
 import {
   deleteCombinationAction,
   saveCombinationAction,
@@ -131,17 +132,27 @@ export function TableCombinationsView({
       toast.error("Podaj poprawny zakres pojemności");
       return;
     }
+    // Ta sama granica co na serwerze: zestawienie nie może obiecywać więcej
+    // miejsc, niż fizycznie jest przy wybranych stołach.
+    if (capacityMax > suggested.max) {
+      toast.error(
+        `Wybrane stoliki mają razem ${suggested.max} miejsc — „do” nie może być większe`,
+      );
+      return;
+    }
     startTransition(async () => {
-      const result = await saveCombinationAction({
-        businessId,
-        locationId,
-        combinationId: editor.combinationId ?? undefined,
-        name: editor.name.trim(),
-        capacityMin,
-        capacityMax,
-        resourceIds: editor.memberIds,
-        isActive: editor.isActive,
-      });
+      const result = await runAction(() =>
+        saveCombinationAction({
+          businessId,
+          locationId,
+          combinationId: editor.combinationId ?? undefined,
+          name: editor.name.trim(),
+          capacityMin,
+          capacityMax,
+          resourceIds: editor.memberIds,
+          isActive: editor.isActive,
+        }),
+      );
       if (result.ok) {
         toast.success(
           editor.combinationId ? "Zapisano zestawienie" : "Zestawienie dodane",
@@ -156,10 +167,9 @@ export function TableCombinationsView({
 
   const remove = (combinationId: string) => {
     startTransition(async () => {
-      const result = await deleteCombinationAction({
-        businessId,
-        combinationId,
-      });
+      const result = await runAction(() =>
+        deleteCombinationAction({ businessId, combinationId }),
+      );
       if (result.ok) {
         toast.success("Zestawienie usunięte");
         setEditor(null);
@@ -358,13 +368,22 @@ export function TableCombinationsView({
                         {tables
                           .filter((table) => table.roomName === roomName)
                           .map((table) => (
+                            /* Stolik oznaczony jako niezestawialny jest
+                               nieklikalny — serwer i tak odrzuci taki skład
+                               (saveCombinationAction), a wcześniej checkbox
+                               działał mimo dopisku „nie zestawia się". */
                             <label
                               key={table.id}
                               data-testid={`combo-table-${table.tableNumber}`}
-                              className="flex min-h-11 items-center gap-2.5 border-b border-muted px-3 py-2 last:border-b-0"
+                              className={
+                                table.combinable
+                                  ? "flex min-h-11 items-center gap-2.5 border-b border-muted px-3 py-2 last:border-b-0"
+                                  : "flex min-h-11 items-center gap-2.5 border-b border-muted px-3 py-2 opacity-55 last:border-b-0"
+                              }
                             >
                               <Checkbox
                                 checked={editor.memberIds.includes(table.id)}
+                                disabled={!table.combinable}
                                 onCheckedChange={() => toggleMember(table.id)}
                               />
                               <span className="font-display text-[13px] font-extrabold">

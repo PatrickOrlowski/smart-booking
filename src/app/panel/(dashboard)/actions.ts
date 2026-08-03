@@ -13,6 +13,7 @@ import {
   requireBusinessManager,
 } from "@/lib/authz";
 import { addMinutes, localDayMinutesToUtc } from "@/lib/time";
+import { PackageRejectedError, consumePackageEntry } from "@/lib/packages";
 import { findOrCreateCustomerForBooking } from "@/app/panel/(dashboard)/klienci/customer-match";
 
 type ActionResult = { ok: true } | { ok: false; error: string };
@@ -27,6 +28,8 @@ const createBookingSchema = z.object({
   customerPhone: z.string().trim().max(30).optional(),
   customerEmail: z.email("Nieprawidłowy e-mail").optional().or(z.literal("")),
   note: z.string().trim().max(500).optional(),
+  /** Wizyta rozliczana wejściem z karnetu klienta (cena 0). */
+  customerPackageId: z.string().min(1).optional(),
 });
 
 /**
@@ -122,47 +125,83 @@ export async function createManualBookingAction(
     const blockedStartAt = addMinutes(startAt, -service.bufferBeforeMin);
     const blockedEndAt = addMinutes(endAt, service.bufferAfterMin);
 
-    // CRM: gość z telefonem/e-mailem jest dopasowywany do istniejącego
-    // profilu klienta firmy (albo dostaje nowy) — dzięki temu ręczne wizyty
-    // liczą się do historii, wydatków i polityki no-show.
-    const customer = await findOrCreateCustomerForBooking(data.businessId, {
-      name: data.customerName,
-      phone: data.customerPhone || null,
-      email: data.customerEmail || null,
-    });
+    // Wizyta i wykorzystanie karnetu w JEDNEJ transakcji: odrzucone wejście
+    // (karnet wyczerpany, przeterminowany, cudzy) cofa całą rezerwację,
+    // a zapisana wizyta zawsze ma pokrycie w wierszu PackageUsage.
+    const booking = await prisma.$transaction(async (tx) => {
+      // CRM: gość z telefonem/e-mailem jest dopasowywany do istniejącego
+      // profilu klienta firmy (albo dostaje nowy) — dzięki temu ręczne wizyty
+      // liczą się do historii, wydatków i polityki no-show.
+      const customer = await findOrCreateCustomerForBooking(
+        data.businessId,
+        {
+          name: data.customerName,
+          phone: data.customerPhone || null,
+          email: data.customerEmail || null,
+        },
+        tx,
+      );
 
-    const booking = await prisma.booking.create({
-      select: { id: true },
-      data: {
-        businessId: data.businessId,
-        locationId: resource.location.id,
-        customerId: customer?.id ?? null,
-        guestName: data.customerName,
-        guestPhone: data.customerPhone || null,
-        guestEmail: data.customerEmail || null,
-        status: "CONFIRMED",
-        source: "MANUAL_STAFF",
-        startAt,
-        endAt,
-        totalPriceCents: priceCents,
-        currency: service.currency,
-        internalNote: data.note || null,
-        items: {
-          create: {
-            serviceId: service.id,
-            resourceId: resource.id,
-            startAt,
-            endAt,
-            blockedStartAt,
-            blockedEndAt,
-            durationMin,
-            bufferBeforeMin: service.bufferBeforeMin,
-            bufferAfterMin: service.bufferAfterMin,
-            priceCents,
+      const paidByPackage = data.customerPackageId !== undefined;
+      const created = await tx.booking.create({
+        select: { id: true },
+        data: {
+          businessId: data.businessId,
+          locationId: resource.location.id,
+          customerId: customer?.id ?? null,
+          guestName: data.customerName,
+          guestPhone: data.customerPhone || null,
+          guestEmail: data.customerEmail || null,
+          status: "CONFIRMED",
+          source: "MANUAL_STAFF",
+          startAt,
+          endAt,
+          // Wizyta z karnetu jest opłacona z góry — klient nie płaci nic
+          // przy wizycie. Pozycja BookingItem zachowuje cenę katalogową,
+          // żeby wiadomo było, ile warte było skasowane wejście.
+          totalPriceCents: paidByPackage ? 0 : priceCents,
+          customerPackageId: data.customerPackageId ?? null,
+          currency: service.currency,
+          internalNote: data.note || null,
+          items: {
+            create: {
+              serviceId: service.id,
+              resourceId: resource.id,
+              startAt,
+              endAt,
+              blockedStartAt,
+              blockedEndAt,
+              durationMin,
+              bufferBeforeMin: service.bufferBeforeMin,
+              bufferAfterMin: service.bufferAfterMin,
+              priceCents,
+            },
           },
         },
-      },
+      });
+
+      if (data.customerPackageId) {
+        await consumePackageEntry(tx, {
+          businessId: data.businessId,
+          customerPackageId: data.customerPackageId,
+          bookingId: created.id,
+          customerId: customer?.id ?? null,
+          serviceId: service.id,
+        });
+      }
+
+      return created;
     });
+
+    if (data.customerPackageId) {
+      await logAudit({
+        businessId: data.businessId,
+        action: "PACKAGE_ENTRY_USED",
+        entityType: "CustomerPackage",
+        entityId: data.customerPackageId,
+        metadata: { bookingId: booking.id, serviceId: data.serviceId },
+      });
+    }
 
     // Znamy adres klienta → wysyłamy takie samo potwierdzenie jak przy
     // rezerwacji online (bez tego klient dostawał tylko przypomnienie 24 h
@@ -173,6 +212,10 @@ export async function createManualBookingAction(
   } catch (error) {
     if (error instanceof UnauthorizedError || error instanceof ForbiddenError) {
       return { ok: false, error: error.message };
+    }
+    // Karnet wyczerpany/przeterminowany to komunikat dla obsługi, nie awaria.
+    if (error instanceof PackageRejectedError) {
+      return { ok: false, error: error.userMessage };
     }
     if (isOverlapError(error)) {
       return { ok: false, error: "Termin koliduje z inną wizytą" };

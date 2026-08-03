@@ -2,6 +2,12 @@ import Link from "next/link";
 import { cityDisplay } from "@/app/m/miasta";
 import { AvailabilityPill } from "@/components/marketplace/availability-pill";
 import { formatPrice } from "@/components/marketplace/format";
+import {
+  DEFAULT_LOCALE,
+  createPluralTranslator,
+  createTranslator,
+  type Locale,
+} from "@/i18n";
 
 /**
  * Karta firmy na listingach (home, strony miast i kategorii) — wzorzec
@@ -28,38 +34,41 @@ export type BusinessCardData = {
 };
 
 /**
- * „1 wynik" / „3 wyniki" / „0 wyników" — polska liczba mnoga liczebnika
- * (2–4 → forma mnoga, ale nie dla 12–14).
+ * „1 wynik" / „3 wyniki" / „0 wyników" — liczebnik przez Intl.PluralRules
+ * (PL: 3 formy, EN: 2). Jedna reguła dla wszystkich listingów.
  */
-export function resultsCountLabel(count: number): string {
-  if (count === 1) return "1 wynik";
-  const mod10 = count % 10;
-  const mod100 = count % 100;
-  const plural =
-    mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)
-      ? "wyniki"
-      : "wyników";
-  return `${count} ${plural}`;
+export function resultsCountLabel(
+  count: number,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return createPluralTranslator(locale)("plural.results", count);
 }
 
-/** Wspólny format oceny: „4,6"; brak opinii → „5,0". */
+/** Wspólny format oceny: „4,6" / „4.6"; brak opinii → „5,0" / „5.0". */
 export function ratingFromAggregate(
   average: number | null,
   count: number,
+  locale: Locale = DEFAULT_LOCALE,
 ): RatingSummary {
-  if (count === 0 || average === null) return { score: "5,0", count: 0 };
-  return { score: average.toFixed(1).replace(".", ","), count };
+  const separator = locale === "pl" ? "," : ".";
+  if (count === 0 || average === null) {
+    return { score: `5${separator}0`, count: 0 };
+  }
+  return { score: average.toFixed(1).replace(".", separator), count };
 }
 
 export function BusinessCard({
   business,
   promoted = false,
   slotLabel,
+  locale = DEFAULT_LOCALE,
 }: {
   business: BusinessCardData;
   promoted?: boolean;
   slotLabel?: string | null;
+  locale?: Locale;
 }) {
+  const t = createTranslator(locale);
   const location = business.locations[0];
   const rating = business.rating;
   const priceFrom = business.services[0];
@@ -75,7 +84,7 @@ export function BusinessCard({
         className="block overflow-hidden rounded-2xl border-[1.5px] border-border-strong bg-card md:flex md:flex-col"
       >
         <div className="photo-placeholder flex h-28 flex-none items-center justify-center font-mono text-[10px] tracking-[0.08em] text-[#8f8b81]">
-          ZDJĘCIE LOKALU 16:9
+          {t("common.photo169")}
         </div>
         <div className="px-[15px] pt-[13px] pb-[15px] md:flex md:flex-1 md:flex-col">
           <div className="flex items-start justify-between gap-2.5">
@@ -90,12 +99,12 @@ export function BusinessCard({
           <div className="mt-[3px] text-xs text-muted-foreground">
             {address}
             {priceFrom
-              ? ` · od ${formatPrice(priceFrom.priceCents, priceFrom.currency)}`
+              ? ` · ${t("format.priceFrom", { price: formatPrice(priceFrom.priceCents, priceFrom.currency, locale) })}`
               : ""}
           </div>
           {slotLabel !== undefined ? (
             <div className="mt-[11px] md:mt-auto md:pt-[11px]">
-              <AvailabilityPill label={slotLabel} />
+              <AvailabilityPill label={slotLabel} locale={locale} />
             </div>
           ) : null}
         </div>
@@ -110,7 +119,7 @@ export function BusinessCard({
     >
       <div className="photo-placeholder flex size-[62px] flex-none items-center justify-center rounded-xl md:h-28 md:w-full md:rounded-none">
         <span className="hidden font-mono text-[10px] tracking-[0.08em] text-[#8f8b81] md:block">
-          ZDJĘCIE LOKALU
+          {t("common.photo")}
         </span>
       </div>
       <div className="min-w-0 md:flex md:flex-1 md:flex-col md:px-[15px] md:pt-[13px] md:pb-[15px]">
@@ -123,16 +132,16 @@ export function BusinessCard({
         </div>
         {slotLabel !== undefined ? (
           <div className="mt-1.5 text-xs text-muted-foreground md:mt-auto md:pt-2">
-            Najbliższy wolny:{" "}
+            {t("home.nearestFree")}{" "}
             <span className="font-semibold text-foreground">
-              {slotLabel ?? "brak w tym tygodniu"}
+              {slotLabel ?? t("home.noneThisWeek")}
             </span>
           </div>
         ) : priceFrom ? (
           <div className="mt-1.5 text-xs text-muted-foreground md:mt-auto md:pt-2">
-            od{" "}
+            {t("format.from")}{" "}
             <span className="font-semibold text-foreground">
-              {formatPrice(priceFrom.priceCents, priceFrom.currency)}
+              {formatPrice(priceFrom.priceCents, priceFrom.currency, locale)}
             </span>
           </div>
         ) : null}

@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Phone } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatTimeInZone } from "@/components/marketplace/format";
+import { useTranslations } from "@/i18n/client";
 import { DayStrip } from "./day-strip";
 import { PartySizePills } from "./party-size-pills";
 import { useTableAvailability } from "./use-availability";
@@ -12,6 +13,8 @@ import {
   isoDayLabel,
   nextLocalDays,
   partySizeLabel,
+  partyTooLargeMessage,
+  partyTooSmallMessage,
   turnTimeLabel,
 } from "./format";
 import { turnTimeFor, type AvailabilityResponse, type RestaurantBookingData } from "./types";
@@ -35,7 +38,8 @@ export function ReservationWidget({
   data: RestaurantBookingData;
   initial: { date: string; partySize: number; data: AvailabilityResponse };
 }) {
-  const days = nextLocalDays(data.timezone, 14, new Date(data.nowIso));
+  const { locale, t } = useTranslations();
+  const days = nextLocalDays(data.timezone, 14, new Date(data.nowIso), locale);
   const [partySize, setPartySize] = useState(initial.partySize);
   const [date, setDate] = useState(initial.date);
 
@@ -66,21 +70,22 @@ export function ReservationWidget({
   return (
     <section className="mt-5">
       <div className="rounded-2xl border-[1.5px] border-border-strong bg-card p-4 md:p-5">
-        <div className="meta-label">Rezerwacja stolika</div>
+        <div className="meta-label">{t("rw.label")}</div>
         <h2 className="mt-1 mb-3.5 font-display text-[21px] leading-tight font-extrabold tracking-tight">
-          Ile Was będzie?
+          {t("rw.howMany")}
         </h2>
 
         <PartySizePills
           value={partySize}
           onChange={setPartySize}
+          min={data.minPartySizeSeatable}
           max={Math.max(12, data.maxPartySizeSeatable)}
         />
 
         <div className="mt-4 mb-2 flex items-baseline justify-between gap-3">
-          <div className="meta-label">Dzień</div>
+          <div className="meta-label">{t("rw.day")}</div>
           <div className="font-mono text-[11px] text-[#8f8b81]">
-            {isoDayLabel(date)}
+            {isoDayLabel(date, locale)}
           </div>
         </div>
         <DayStrip
@@ -99,7 +104,22 @@ export function ReservationWidget({
             </div>
           ) : outcome?.kind === "tooLarge" ? (
             <LargePartyCard
-              message={outcome.info.message}
+              message={partyTooLargeMessage(
+                outcome.info.maxPartySizeOnline,
+                outcome.info.phone ?? data.phone,
+                locale,
+              )}
+              phone={outcome.info.phone ?? data.phone}
+            />
+          ) : outcome?.kind === "tooSmall" ? (
+            <LargePartyCard
+              label={t("lp.smallLabel")}
+              title={t("lp.smallTitle")}
+              message={partyTooSmallMessage(
+                outcome.info.minPartySizeSeatable,
+                outcome.info.phone ?? data.phone,
+                locale,
+              )}
               phone={outcome.info.phone ?? data.phone}
             />
           ) : outcome?.kind === "error" ? (
@@ -112,24 +132,24 @@ export function ReservationWidget({
                 onClick={availability.reload}
                 className="min-h-11 rounded-full border-[1.5px] border-border-strong bg-card px-4 text-[13px] font-semibold"
               >
-                Spróbuj ponownie
+                {t("common.retry")}
               </button>
             </div>
           ) : slots.length === 0 ? (
             <div className="rounded-xl border border-border bg-muted/60 p-3.5">
               <div className="text-[13px] font-bold">
-                Brak wolnych stolików tego dnia
+                {t("rw.noTablesDay")}
               </div>
               <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
                 {data.waitlistEnabled
-                  ? "Sprawdź inny dzień albo zapisz się na listę oczekujących — damy znać, gdy stolik się zwolni."
-                  : "Sprawdź inny dzień na pasku powyżej."}
+                  ? t("rw.checkOtherDayWaitlist")
+                  : t("rw.checkOtherDay")}
               </p>
               <Link
                 href={flowHref()}
                 className="mt-3 inline-flex min-h-11 items-center rounded-full bg-primary px-4 text-[13px] font-bold text-primary-foreground"
               >
-                {data.waitlistEnabled ? "Zapisz się na listę" : "Szukaj terminu"}
+                {data.waitlistEnabled ? t("rw.joinWaitlist") : t("rw.findSlot")}
               </Link>
             </div>
           ) : (
@@ -147,7 +167,7 @@ export function ReservationWidget({
               </div>
               {slots.length > PREVIEW_LIMIT ? (
                 <div className="mt-2 font-mono text-[11px] text-[#8f8b81]">
-                  + {slots.length - PREVIEW_LIMIT} kolejnych godzin
+                  {t("rw.moreHours", { count: slots.length - PREVIEW_LIMIT })}
                 </div>
               ) : null}
             </>
@@ -156,14 +176,16 @@ export function ReservationWidget({
 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-muted pt-3.5">
           <div className="font-mono text-[11px] text-muted-foreground">
-            Stolik na {turnTimeLabel(durationMin)} ·{" "}
-            {partySizeLabel(partySize)}
+            {t("rw.tableForParty", {
+              turn: turnTimeLabel(durationMin),
+              party: partySizeLabel(partySize, locale),
+            })}
           </div>
           <Link
             href={flowHref()}
             className="flex min-h-11 items-center rounded-full bg-primary px-4 text-[13px] font-bold text-primary-foreground"
           >
-            Rezerwuj stolik
+            {t("rest.bookTableCta")}
           </Link>
         </div>
       </div>
@@ -171,16 +193,25 @@ export function ReservationWidget({
   );
 }
 
-/** Grupa ponad limit rezerwacji online — jedyną drogą jest telefon. */
+/**
+ * Grupa poza limitami rezerwacji online — jedyną drogą jest telefon.
+ * Ta sama karta obsługuje obie granice: grupę ponad `maxPartySizeOnline`
+ * i grupę mniejszą niż najmniejszy stolik lokalu (`minPartySizeSeatable`).
+ */
 export function LargePartyCard({
   message,
   phone,
   className,
+  label,
+  title,
 }: {
   message: string;
   phone: string | null;
   className?: string;
+  label?: string;
+  title?: string;
 }) {
+  const { t } = useTranslations();
   return (
     <div
       className={
@@ -188,9 +219,11 @@ export function LargePartyCard({
         "rounded-xl border-[1.5px] border-border-strong bg-warning-soft p-4"
       }
     >
-      <div className="meta-label text-warning-strong">Duża grupa</div>
+      <div className="meta-label text-warning-strong">
+        {label ?? t("lp.largeLabel")}
+      </div>
       <div className="mt-1 mb-1.5 font-display text-[19px] leading-tight font-extrabold tracking-tight">
-        Taką grupę ustalamy telefonicznie
+        {title ?? t("lp.largeTitle")}
       </div>
       <p className="text-[12.5px] leading-relaxed text-foreground/80">
         {message}
@@ -201,7 +234,7 @@ export function LargePartyCard({
           className="mt-3.5 flex min-h-11 items-center justify-center gap-2 rounded-full bg-primary px-4 text-[13px] font-bold text-primary-foreground"
         >
           <Phone aria-hidden className="size-4" />
-          Zadzwoń {phone}
+          {t("lp.call", { phone })}
         </a>
       ) : null}
     </div>

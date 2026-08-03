@@ -5,6 +5,7 @@ import {
   Instrument_Sans,
 } from "next/font/google";
 import "./globals.css";
+import { HtmlLangSync } from "@/i18n/html-lang";
 
 const displayFont = Bricolage_Grotesque({
   variable: "--font-display",
@@ -35,12 +36,19 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // `lang="pl"` to serwerowy default: layout nie może czytać cookie języka,
+  // bo zdegradowałby trasy statyczne (ISR miast/kategorii) do renderu
+  // dynamicznego. <HtmlLangSync /> poprawia atrybut po hydracji, a boty
+  // (bez cookie) i tak dostają polską treść — dla nich "pl" jest poprawne.
   return (
     <html
       lang="pl"
       className={`${displayFont.variable} ${sansFont.variable} ${monoFont.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <HtmlLangSync />
+        {children}
+      </body>
     </html>
   );
 }

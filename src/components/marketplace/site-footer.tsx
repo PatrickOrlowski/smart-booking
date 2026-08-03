@@ -1,11 +1,16 @@
 import Link from "next/link";
-import { KATEGORIE } from "@/app/k/kategorie";
+import { KATEGORIE, kategoriaLabel } from "@/app/k/kategorie";
 import { cityDisplay, citySlug, getActiveCities } from "@/app/m/miasta";
+import { DEFAULT_LOCALE, createTranslator, type Locale } from "@/i18n";
+import { LocaleSwitcher } from "@/i18n/locale-switcher";
 
 /**
  * Stopka marketplace — ciemna (bg-ink), kolumny: logo + opis, Miasta,
  * Kategorie, Dla firm. Linki miast prowadzą do stron SEO /m/[miasto],
- * kategorii do /k/[kategoria].
+ * kategorii do /k/[kategoria]. Na dole przełącznik języka PL/EN —
+ * jedyny widoczny na telefonie (belka nagłówka jest lg+).
+ *
+ * `locale` z propsa — stopka nie czyta cookies (strony ISR!).
  */
 
 const columnHeading =
@@ -13,7 +18,12 @@ const columnHeading =
 const columnLink =
   "text-[13px] text-ink-foreground/75 transition-colors hover:text-ink-foreground";
 
-export async function SiteFooter() {
+export async function SiteFooter({
+  locale = DEFAULT_LOCALE,
+}: {
+  locale?: Locale;
+}) {
+  const t = createTranslator(locale);
   const cities = await getActiveCities().catch(() => [] as string[]);
 
   return (
@@ -25,17 +35,16 @@ export async function SiteFooter() {
               Planner
             </div>
             <p className="mt-3 max-w-[280px] text-[13px] leading-relaxed text-ink-foreground/60">
-              Marketplace rezerwacji: znajdź salon, wybierz termin i umów
-              wizytę online — bez telefonu, o każdej porze.
+              {t("footer.tagline")}
             </p>
           </div>
 
           <div>
-            <div className={columnHeading}>Miasta</div>
+            <div className={columnHeading}>{t("footer.cities")}</div>
             <ul className="mt-3 flex flex-col gap-2">
               {cities.length === 0 ? (
                 <li className="text-[13px] text-ink-foreground/50">
-                  Wkrótce więcej miast
+                  {t("footer.moreCitiesSoon")}
                 </li>
               ) : (
                 cities.map((city) => (
@@ -50,12 +59,12 @@ export async function SiteFooter() {
           </div>
 
           <div>
-            <div className={columnHeading}>Kategorie</div>
+            <div className={columnHeading}>{t("footer.categories")}</div>
             <ul className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 md:grid-cols-1">
               {Object.entries(KATEGORIE).map(([slug, kategoria]) => (
                 <li key={slug}>
                   <Link href={`/k/${slug}`} className={columnLink}>
-                    {kategoria.label}
+                    {kategoriaLabel(kategoria, locale)}
                   </Link>
                 </li>
               ))}
@@ -63,24 +72,30 @@ export async function SiteFooter() {
           </div>
 
           <div>
-            <div className={columnHeading}>Dla firm</div>
+            <div className={columnHeading}>{t("footer.forBusinesses")}</div>
             <ul className="mt-3 flex flex-col gap-2">
               <li>
                 <Link href="/rejestracja" className={columnLink}>
-                  Załóż profil firmy
+                  {t("footer.createProfile")}
                 </Link>
               </li>
               <li>
                 <Link href="/login" className={columnLink}>
-                  Zaloguj się
+                  {t("footer.login")}
                 </Link>
               </li>
             </ul>
           </div>
         </div>
 
-        <div className="mt-10 border-t border-ink-foreground/15 pt-5 font-mono text-[11px] text-ink-foreground/45">
-          © {new Date().getFullYear()} Planner
+        <div className="mt-10 flex flex-wrap items-center justify-between gap-3 border-t border-ink-foreground/15 pt-5">
+          <div className="font-mono text-[11px] text-ink-foreground/45">
+            © {new Date().getFullYear()} Planner
+          </div>
+          <div className="flex items-center gap-2.5">
+            <span className={columnHeading}>{t("footer.language")}</span>
+            <LocaleSwitcher variant="dark" />
+          </div>
         </div>
       </div>
     </footer>

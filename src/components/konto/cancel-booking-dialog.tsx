@@ -13,6 +13,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { cancelBookingAction } from "@/app/konto/actions";
+import { useTranslations } from "@/i18n/client";
 
 /**
  * Dialog potwierdzenia anulowania wizyty. Walidacja (własność, status,
@@ -29,6 +30,7 @@ export function CancelBookingDialog({
   dateLabel: string;
   cutoffHours: number;
 }) {
+  const { t } = useTranslations();
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -54,17 +56,19 @@ export function CancelBookingDialog({
       }}
     >
       <DialogTrigger className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-full border border-destructive/30 bg-card px-4 text-[13px] font-semibold text-destructive transition-colors hover:bg-destructive/10">
-        Anuluj wizytę
+        {t("konto.cancel.trigger")}
       </DialogTrigger>
       <DialogContent className="rounded-2xl border border-border bg-card p-5 sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="font-display text-[22px] leading-tight font-extrabold tracking-tight">
-            Anulować wizytę?
+            {t("konto.cancel.title")}
           </DialogTitle>
           <DialogDescription className="text-[13px] leading-relaxed text-muted-foreground">
-            {businessName}, {dateLabel}. Bezpłatne odwołanie jest możliwe do{" "}
-            <b className="text-foreground">{cutoffHours} h</b> przed wizytą —
-            później termin przepada.
+            {t("konto.cancel.description", {
+              business: businessName,
+              date: dateLabel,
+              hours: cutoffHours,
+            })}
           </DialogDescription>
         </DialogHeader>
 
@@ -79,7 +83,7 @@ export function CancelBookingDialog({
 
         <DialogFooter className="mx-0 mb-0 rounded-b-none border-0 bg-transparent p-0 pt-1">
           <DialogClose className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-full border-[1.5px] border-border-strong bg-card px-4 text-[13px] font-semibold transition-colors hover:bg-muted">
-            Zachowaj wizytę
+            {t("konto.cancel.keep")}
           </DialogClose>
           <button
             type="button"
@@ -87,7 +91,7 @@ export function CancelBookingDialog({
             disabled={isPending}
             className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-full bg-destructive px-4 text-[13px] font-semibold text-white transition-colors hover:bg-destructive/85 disabled:opacity-60"
           >
-            {isPending ? "Anulowanie…" : "Anuluj wizytę"}
+            {isPending ? t("konto.cancel.pending") : t("konto.cancel.confirm")}
           </button>
         </DialogFooter>
       </DialogContent>

@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { getPanelBusiness } from "@/app/panel/data";
 import { FloorPlanView } from "@/components/panel/floor-plan-view";
-import type { PlanRoom } from "./plan-utils";
+import type { PlanRoom, PlanTable } from "./plan-utils";
 
 /** Sale lokalu i edytor planu sali (siatka + kafle stolików). */
 export default async function RoomsPage() {
@@ -18,7 +18,7 @@ export default async function RoomsPage() {
     );
   }
 
-  const [rooms, unassignedCount] = await Promise.all([
+  const [rooms, orphanTables] = await Promise.all([
     prisma.room.findMany({
       where: { locationId: location.id },
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
@@ -45,8 +45,28 @@ export default async function RoomsPage() {
         },
       },
     }),
-    prisma.resource.count({
+    // Stoliki osierocone po skasowaniu sali (FK resources_room_id_fkey ma
+    // ON DELETE SET NULL). Bez ich listy dialog stolika nie dawał się otworzyć
+    // z żadnego miejsca i były trwale nieedytowalne z panelu.
+    prisma.resource.findMany({
       where: { locationId: location.id, type: "TABLE", roomId: null },
+      orderBy: { sortOrder: "asc" },
+      select: {
+        id: true,
+        roomId: true,
+        tableNumber: true,
+        capacityMin: true,
+        capacityMax: true,
+        shape: true,
+        area: true,
+        combinable: true,
+        posX: true,
+        posY: true,
+        spanX: true,
+        spanY: true,
+        isActive: true,
+        _count: { select: { bookingItems: true } },
+      },
     }),
   ]);
 
@@ -75,12 +95,31 @@ export default async function RoomsPage() {
     })),
   }));
 
+  const unassignedTables: PlanTable[] = orphanTables.map((table) => ({
+    id: table.id,
+    // Dialog i tak ma selektor sali — pusty `roomId` zmusza managera
+    // do wskazania sali przy pierwszym zapisie.
+    roomId: "",
+    tableNumber: table.tableNumber ?? "?",
+    capacityMin: table.capacityMin ?? 1,
+    capacityMax: table.capacityMax ?? 1,
+    shape: table.shape ?? "SQUARE",
+    area: table.area ?? "INDOOR",
+    combinable: table.combinable,
+    posX: table.posX ?? 0,
+    posY: table.posY ?? 0,
+    spanX: table.spanX ?? 1,
+    spanY: table.spanY ?? 1,
+    isActive: table.isActive,
+    hasBookings: table._count.bookingItems > 0,
+  }));
+
   return (
     <FloorPlanView
       businessId={business.id}
       locationId={location.id}
       rooms={planRooms}
-      unassignedCount={unassignedCount}
+      unassignedTables={unassignedTables}
       isManager={isManager}
     />
   );

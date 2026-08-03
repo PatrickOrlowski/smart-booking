@@ -6,6 +6,7 @@ import { AuthError } from "next-auth";
 import { credentialsSchema, signIn } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { roleHomePath } from "@/components/auth/paths";
+import { getTranslations } from "@/i18n/server";
 
 export type AuthFormState = { error: string | null };
 
@@ -13,12 +14,14 @@ export async function loginAction(
   _previous: AuthFormState,
   formData: FormData,
 ): Promise<AuthFormState> {
+  const { t } = await getTranslations();
+
   const parsed = credentialsSchema.safeParse({
     email: formData.get("email"),
     password: formData.get("password"),
   });
   if (!parsed.success) {
-    return { error: "Nieprawidłowy e-mail lub hasło" };
+    return { error: t("auth.error.invalidCredentials") };
   }
 
   const email = parsed.data.email.toLowerCase();
@@ -32,8 +35,8 @@ export async function loginAction(
   } catch (error) {
     if (error instanceof AuthError) {
       return error.type === "CredentialsSignin"
-        ? { error: "Nieprawidłowy e-mail lub hasło" }
-        : { error: "Logowanie nie powiodło się. Spróbuj ponownie." };
+        ? { error: t("auth.error.invalidCredentials") }
+        : { error: t("auth.error.loginFailed") };
     }
     throw error;
   }

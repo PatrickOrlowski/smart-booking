@@ -7,14 +7,19 @@ import { z } from "zod";
 
 import { signIn } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { getTranslations } from "@/i18n/server";
 
 export type AuthFormState = { error: string | null };
 
+/**
+ * Schema bez wbudowanych komunikatów — teksty błędów wybieramy po walidacji
+ * na podstawie pola, w aktywnym języku (cookie `planner.locale`).
+ */
 const registerSchema = z.object({
   accountType: z.enum(["klient", "firma"]),
-  name: z.string().trim().min(3, "Podaj imię i nazwisko"),
-  email: z.email("Podaj poprawny adres e-mail"),
-  password: z.string().min(8, "Hasło musi mieć co najmniej 8 znaków"),
+  name: z.string().trim().min(3),
+  email: z.email(),
+  password: z.string().min(8),
 });
 
 function isUniqueViolation(error: unknown): boolean {
@@ -30,6 +35,8 @@ export async function registerAction(
   _previous: AuthFormState,
   formData: FormData,
 ): Promise<AuthFormState> {
+  const { t } = await getTranslations();
+
   const parsed = registerSchema.safeParse({
     accountType: formData.get("accountType"),
     name: formData.get("name"),
@@ -37,9 +44,16 @@ export async function registerAction(
     password: formData.get("password"),
   });
   if (!parsed.success) {
-    return {
-      error: parsed.error.issues[0]?.message ?? "Sprawdź poprawność danych",
-    };
+    const field = parsed.error.issues[0]?.path[0];
+    const error =
+      field === "name"
+        ? t("auth.error.nameRequired")
+        : field === "email"
+          ? t("auth.error.emailInvalid")
+          : field === "password"
+            ? t("auth.error.passwordMin")
+            : t("auth.error.checkData");
+    return { error };
   }
 
   const { accountType, name, password } = parsed.data;
@@ -50,7 +64,7 @@ export async function registerAction(
     select: { id: true },
   });
   if (existing) {
-    return { error: "Konto z tym adresem już istnieje" };
+    return { error: t("auth.error.emailTaken") };
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
@@ -67,7 +81,7 @@ export async function registerAction(
   } catch (error) {
     // Wyścig dwóch rejestracji na ten sam adres — unikat w bazie łapie resztę.
     if (isUniqueViolation(error)) {
-      return { error: "Konto z tym adresem już istnieje" };
+      return { error: t("auth.error.emailTaken") };
     }
     throw error;
   }

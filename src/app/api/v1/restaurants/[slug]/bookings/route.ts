@@ -15,26 +15,39 @@ import { createTableBooking } from "@/lib/table-booking";
  * 422 walidacja / grupa ponad limit online.
  */
 
-const bookingSchema = z.object({
-  startAt: z.iso.datetime(),
-  partySize: z.number().int().min(1, "Podaj liczbę osób").max(200),
-  /** Wybór gościa; brak = silnik dobiera stolik sam. */
-  tableIds: z.array(z.string().min(1)).min(1).max(8).optional(),
-  combinationId: z.string().min(1).optional(),
-  area: z.enum(["INDOOR", "OUTDOOR", "BAR", "PRIVATE"]).optional(),
-  guest: z
-    .object({
-      name: z.string().min(2, "Podaj imię i nazwisko").max(120),
-      email: z.email("Nieprawidłowy adres e-mail"),
-      phone: z
-        .string()
-        .min(7, "Nieprawidłowy numer telefonu")
-        .max(20)
-        .regex(/^[+\d][\d\s-]+$/, "Nieprawidłowy numer telefonu"),
-    })
-    .optional(),
-  note: z.string().max(500).optional(),
-});
+const bookingSchema = z
+  .object({
+    startAt: z.iso.datetime(),
+    partySize: z.number().int().min(1, "Podaj liczbę osób").max(200),
+    /** Wybór gościa; brak = silnik dobiera stolik sam. */
+    tableIds: z.array(z.string().min(1)).min(1).max(8).optional(),
+    combinationId: z.string().min(1).optional(),
+    area: z.enum(["INDOOR", "OUTDOOR", "BAR", "PRIVATE"]).optional(),
+    guest: z
+      .object({
+        name: z.string().min(2, "Podaj imię i nazwisko").max(120),
+        email: z.email("Nieprawidłowy adres e-mail"),
+        phone: z
+          .string()
+          .min(7, "Nieprawidłowy numer telefonu")
+          .max(20)
+          .regex(/^[+\d][\d\s-]+$/, "Nieprawidłowy numer telefonu"),
+      })
+      .optional(),
+    note: z.string().max(500).optional(),
+  })
+  // Podanie obu pól naraz jest niejednoznaczne — silnik i tak honorowałby
+  // `combinationId` i po cichu zapisał rezerwację na innych stolikach, niż
+  // prosił klient.
+  .refine(
+    (value) =>
+      !(value.combinationId && value.tableIds && value.tableIds.length > 0),
+    {
+      path: ["tableIds"],
+      message:
+        "Podaj albo tableIds, albo combinationId — nie oba naraz",
+    },
+  );
 
 export async function POST(
   request: Request,

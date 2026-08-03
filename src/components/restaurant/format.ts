@@ -1,8 +1,15 @@
 import type { RestaurantArea } from "@/generated/prisma/enums";
 import { utcToZonedWallClock } from "@/lib/time";
 import {
-  WEEKDAYS_SHORT,
+  DEFAULT_LOCALE,
+  INTL_LOCALE,
+  createPluralTranslator,
+  createTranslator,
+  type Locale,
+} from "@/i18n";
+import {
   formatTimeInZone,
+  weekdaysShort,
 } from "@/components/marketplace/format";
 
 /**
@@ -10,22 +17,23 @@ import {
  *
  * Panel ma własne etykiety stref w `app/panel/(dashboard)/sale/plan-utils.ts` —
  * są operacyjne („Taras / ogródek"), a gość widzi krótkie nazwy sal, więc
- * słowniki celowo się nie pokrywają.
+ * słowniki celowo się nie pokrywają. Wszystkie funkcje z tekstem przyjmują
+ * `locale` (domyślnie "pl").
  */
 
-export const GUEST_AREA_LABELS: Record<RestaurantArea, string> = {
-  INDOOR: "Sala",
-  OUTDOOR: "Taras",
-  BAR: "Bar",
-  PRIVATE: "Sala prywatna",
-};
+export function guestAreaLabel(
+  area: RestaurantArea,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return createTranslator(locale)(`area.${area}`);
+}
 
-export const GUEST_AREA_HINTS: Record<RestaurantArea, string> = {
-  INDOOR: "Główna sala restauracji",
-  OUTDOOR: "Stoliki na zewnątrz, sezonowo",
-  BAR: "Wysokie stoliki przy barze",
-  PRIVATE: "Osobne pomieszczenie dla grup",
-};
+export function guestAreaHint(
+  area: RestaurantArea,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return createTranslator(locale)(`areaHint.${area}`);
+}
 
 /** Kolejność prezentacji stref — ta sama co w silniku dostępności. */
 export const AREA_ORDER: RestaurantArea[] = [
@@ -43,23 +51,52 @@ export function turnTimeLabel(minutes: number): string {
   return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
 }
 
-/** „2 osoby" / „1 osoba" / „5 osób" — polska odmiana liczebnika. */
-export function partySizeLabel(size: number): string {
-  if (size === 1) return "1 osoba";
-  const mod10 = size % 10;
-  const mod100 = size % 100;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
-    return `${size} osoby`;
-  }
-  return `${size} osób`;
+/** „2 osoby" / „1 osoba" / „5 osób" — odmiana przez Intl.PluralRules. */
+export function partySizeLabel(
+  size: number,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return createPluralTranslator(locale)("plural.persons", size);
 }
 
 /**
  * Dopełniacz do fraz „dla …", „stolika dla …": „1 osoby" / „4 osób".
  * Mianownik z `partySizeLabel` dałby tam „stolika dla 4 osoby".
+ * W EN dopełniacz = mianownik.
  */
-export function partySizeGenitive(size: number): string {
-  return size === 1 ? "1 osoby" : `${size} osób`;
+export function partySizeGenitive(
+  size: number,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return createPluralTranslator(locale)("plural.personsGenitive", size);
+}
+
+/**
+ * Komunikat „grupa ponad limit online" składany PO STRONIE KLIENTA z danych
+ * odpowiedzi 422 — pole `message` z API jest zawsze polskie, a komunikat ma
+ * mówić językiem strony.
+ */
+export function partyTooLargeMessage(
+  max: number,
+  phone: string | null,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return createTranslator(locale)("lp.tooLargeMsg", {
+    max,
+    phone: phone ? `: ${phone}` : "",
+  });
+}
+
+/** Symetrycznie dla dolnej granicy — grupa mniejsza niż najmniejszy stolik. */
+export function partyTooSmallMessage(
+  min: number,
+  phone: string | null,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return createTranslator(locale)("lp.tooSmallMsg", {
+    min,
+    phone: phone ? `: ${phone}` : "",
+  });
 }
 
 /** Czy lokal jest w tym dniu zamknięty (brak reguł godzin otwarcia). */
@@ -83,29 +120,35 @@ const localDaySerial = (instant: Date, timeZone: string): number => {
 export function relativeDayLabel(
   instant: Date,
   timeZone: string,
+  locale: Locale = DEFAULT_LOCALE,
   now: Date = new Date(),
 ): string {
+  const t = createTranslator(locale);
   const dayDiff =
     (localDaySerial(instant, timeZone) - localDaySerial(now, timeZone)) /
     (24 * 60 * 60 * 1000);
-  if (dayDiff === 0) return "dziś";
-  if (dayDiff === 1) return "jutro";
+  if (dayDiff === 0) return t("common.today");
+  if (dayDiff === 1) return t("common.tomorrow");
   const wall = utcToZonedWallClock(instant, timeZone);
-  return `${WEEKDAYS_SHORT[wall.weekday]} ${wall.day}.${String(wall.month).padStart(2, "0")}`;
+  return `${weekdaysShort(locale)[wall.weekday]} ${wall.day}.${String(wall.month).padStart(2, "0")}`;
 }
 
 /** „Stolik dziś od 18:00" — pastylka restauracji na listingu. */
 export function tableSlotLabel(
   startAt: Date,
   timeZone: string,
+  locale: Locale = DEFAULT_LOCALE,
   now: Date = new Date(),
 ): string {
-  return `Stolik ${relativeDayLabel(startAt, timeZone, now)} od ${formatTimeInZone(startAt, timeZone)}`;
+  return createTranslator(locale)("format.tableSlot", {
+    day: relativeDayLabel(startAt, timeZone, locale, now),
+    time: formatTimeInZone(startAt, timeZone),
+  });
 }
 
 /**
- * Pora dnia slotu — nagłówki siatki godzin. Granice są kulinarne, nie
- * kalendarzowe: lunch do 15:00, kolacja od 17:00.
+ * Pora dnia slotu — klucz logiczny (stały, niezależny od języka).
+ * Granice są kulinarne, nie kalendarzowe: lunch do 15:00, kolacja od 17:00.
  */
 export function mealPeriod(
   instant: Date,
@@ -119,6 +162,14 @@ export function mealPeriod(
 
 export const MEAL_PERIODS = ["Lunch", "Popołudnie", "Kolacja"] as const;
 
+/** Etykieta pory dnia w aktywnym języku. */
+export function mealPeriodLabel(
+  period: (typeof MEAL_PERIODS)[number],
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return createTranslator(locale)(`meal.${period}`);
+}
+
 /** Dzień lokalny lokalu jako „YYYY-MM-DD" — klucz dla API dostępności. */
 export function localIsoDate(instant: Date, timeZone: string): string {
   const wall = utcToZonedWallClock(instant, timeZone);
@@ -130,6 +181,7 @@ export function nextLocalDays(
   timeZone: string,
   count: number,
   now: Date = new Date(),
+  locale: Locale = DEFAULT_LOCALE,
 ): { iso: string; weekday: string; dayNumber: number; isToday: boolean }[] {
   const wall = utcToZonedWallClock(now, timeZone);
   const startSerial = Date.UTC(wall.year, wall.month - 1, wall.day);
@@ -137,7 +189,7 @@ export function nextLocalDays(
     const date = new Date(startSerial + index * 86_400_000);
     return {
       iso: `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`,
-      weekday: WEEKDAYS_SHORT[(date.getUTCDay() + 6) % 7],
+      weekday: weekdaysShort(locale)[(date.getUTCDay() + 6) % 7],
       dayNumber: date.getUTCDate(),
       isToday: index === 0,
     };
@@ -152,8 +204,11 @@ export const capitalizeFirst = (text: string): string =>
   text.charAt(0).toUpperCase() + text.slice(1);
 
 /** „środa, 1 sierpnia" — nagłówek wybranego dnia (data bez strefy, w UTC). */
-export function isoDayLabel(iso: string): string {
-  return new Intl.DateTimeFormat("pl-PL", {
+export function isoDayLabel(
+  iso: string,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  return new Intl.DateTimeFormat(INTL_LOCALE[locale], {
     timeZone: "UTC",
     weekday: "long",
     day: "numeric",

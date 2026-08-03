@@ -35,15 +35,11 @@
     "**/*.mts",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
-    // Typy tras z alternatywnych dist dirów (NEXT_DIST_DIR) — patrz next.config.ts.
     ".next-*/types/**/*.ts",
     ".next-*/dev/types/**/*.ts",
-    ".next-pan/types/**/*.ts",
-    ".next-pan/dev/types/**/*.ts",
-    ".next-host/types/**/*.ts",
-    ".next-host/dev/types/**/*.ts"
+    ".next-check/types/**/*.ts",
+    ".next-check/dev/types/**/*.ts"
   ],
-  // mobile/ to osobny projekt Expo z własnym tsconfigiem.
   "exclude": [
     "node_modules",
     "mobile"

@@ -4,6 +4,8 @@ import { env } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
 import { loadServiceContext } from "@/lib/availability-data";
 import { SiteHeader } from "@/components/marketplace/site-header";
+import { LocaleProvider } from "@/i18n/client";
+import { getTranslations } from "@/i18n/server";
 import { BookingFlow, type BookingFlowData } from "./booking-flow";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +24,7 @@ export default async function BookingPage({
 }) {
   const { slug } = await params;
   const { serviceId } = await searchParams;
+  const { locale } = await getTranslations();
 
   if (!serviceId) redirect(`/b/${slug}`);
 
@@ -82,9 +85,9 @@ export default async function BookingPage({
   };
 
   return (
-    <>
-      <SiteHeader />
+    <LocaleProvider locale={locale}>
+      <SiteHeader locale={locale} />
       <BookingFlow data={data} />
-    </>
+    </LocaleProvider>
   );
 }

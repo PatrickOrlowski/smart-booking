@@ -604,7 +604,11 @@ async function main() {
   const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10);
 
   console.log("→ czyszczenie danych demo");
-  const slugs = [...BUSINESSES.map((b) => b.slug), ...RESTAURANTS.map((r) => r.slug)];
+  const slugs = [
+    ...BUSINESSES.map((b) => b.slug),
+    ...RESTAURANTS.map((r) => r.slug),
+    PENDING_BUSINESS_SLUG,
+  ];
   const existing = await prisma.business.findMany({
     where: { slug: { in: slugs } },
     select: { id: true },
@@ -960,6 +964,7 @@ async function main() {
   }
 
   await seedRestaurants(clientUsers, passwordHash);
+  await seedPlatformMaturity(clientUsers, passwordHash);
 
   const counts = {
     businesses: await prisma.business.count(),
@@ -1497,6 +1502,223 @@ async function seedRestaurants(
       },
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Dojrzałość platformy (faza 8): admin, rabaty, karnety, serie, integracje
+// ---------------------------------------------------------------------------
+
+const PENDING_BUSINESS_SLUG = "nozyce-i-brzytwa-gdansk";
+
+async function seedPlatformMaturity(
+  clientUsers: { id: string; name: string | null; email: string | null }[],
+  passwordHash: string,
+) {
+  console.log("→ platforma: admin, rabaty, karnety, serie, integracje");
+
+  // Konto administratora platformy.
+  await prisma.user.upsert({
+    where: { email: "admin@planner.pl" },
+    update: { passwordHash, role: "PLATFORM_ADMIN" },
+    create: {
+      email: "admin@planner.pl",
+      name: "Administrator Planner",
+      role: "PLATFORM_ADMIN",
+      passwordHash,
+      locale: "pl",
+    },
+  });
+
+  // Firma czekająca na weryfikację — żeby panel admina miał co moderować.
+  const pendingOwner = await prisma.user.upsert({
+    where: { email: "kontakt@nozyceibrzytwa.pl" },
+    update: { passwordHash, role: "BUSINESS_OWNER" },
+    create: {
+      email: "kontakt@nozyceibrzytwa.pl",
+      name: "Rafał Ostrowski",
+      role: "BUSINESS_OWNER",
+      passwordHash,
+    },
+  });
+  const pending = await prisma.business.create({
+    data: {
+      slug: PENDING_BUSINESS_SLUG,
+      name: "Nożyce i Brzytwa",
+      type: "BARBER",
+      status: "PENDING_REVIEW",
+      description:
+        "Barbershop na gdańskiej Oliwie. Klasyczne strzyżenia, gorący ręcznik, kawa z ekspresu.",
+      ownerId: pendingOwner.id,
+      locations: {
+        create: {
+          name: "Nożyce i Brzytwa",
+          addressLine1: "ul. Grunwaldzka 212",
+          city: "Gdańsk",
+          postalCode: "80-266",
+          phone: "+48 58 341 90 12",
+          latitude: 54.4045,
+          longitude: 18.5729,
+          timezone: TIMEZONE,
+          openingHours: { create: standardOpening },
+        },
+      },
+    },
+    include: { locations: true },
+  });
+  await prisma.subscription.create({
+    data: { businessId: pending.id, plan: "FREE", status: "ACTIVE" },
+  });
+
+  // --- Cut & Shave: rabaty, karnety, seria cykliczna, integracje ---
+  const cutAndShave = await prisma.business.findUniqueOrThrow({
+    where: { slug: "cut-and-shave-warszawa" },
+    include: {
+      locations: true,
+      services: { where: { kind: "STANDARD" }, orderBy: { sortOrder: "asc" } },
+      customers: true,
+    },
+  });
+  const location = cutAndShave.locations[0];
+  const haircut = cutAndShave.services[0];
+  const resources = await prisma.resource.findMany({
+    where: { locationId: location.id, type: "STAFF" },
+    orderBy: { sortOrder: "asc" },
+  });
+  const anna = clientUsers[0];
+  const annaCustomer = cutAndShave.customers.find((c) => c.userId === anna.id);
+
+  await prisma.discountCode.createMany({
+    data: [
+      {
+        businessId: cutAndShave.id,
+        code: "LATO20",
+        description: "Rabat wakacyjny na wszystkie usługi",
+        type: "PERCENT",
+        value: 20,
+        maxUses: 100,
+        maxUsesPerCustomer: 1,
+        validTo: new Date(Date.now() + 30 * DAY_MS),
+      },
+      {
+        businessId: cutAndShave.id,
+        code: "PIERWSZA50",
+        description: "50 zł zniżki na pierwszą wizytę (od 100 zł)",
+        type: "AMOUNT",
+        value: zl(50),
+        minAmountCents: zl(100),
+        maxUsesPerCustomer: 1,
+      },
+      {
+        businessId: cutAndShave.id,
+        code: "ZIMA10",
+        description: "Kod archiwalny — wygasł",
+        type: "PERCENT",
+        value: 10,
+        validTo: new Date(Date.now() - 14 * DAY_MS),
+        isActive: false,
+      },
+    ],
+  });
+
+  const pkg = await prisma.servicePackage.create({
+    data: {
+      businessId: cutAndShave.id,
+      name: "Karnet: 5 strzyżeń",
+      description: "Pięć strzyżeń męskich w cenie czterech. Ważny rok od zakupu.",
+      serviceId: haircut.id,
+      entries: 5,
+      priceCents: zl(360),
+      validityDays: 365,
+    },
+  });
+
+  if (annaCustomer) {
+    await prisma.customerPackage.create({
+      data: {
+        packageId: pkg.id,
+        businessId: cutAndShave.id,
+        customerId: annaCustomer.id,
+        entriesTotal: 5,
+        entriesUsed: 2,
+        purchasedAt: new Date(Date.now() - 40 * DAY_MS),
+        expiresAt: new Date(Date.now() + 325 * DAY_MS),
+      },
+    });
+
+    // Seria cykliczna: co 4 tygodnie, ten sam pracownik i godzina.
+    const seriesStart = new Date(Date.now() + 7 * DAY_MS);
+    await prisma.bookingSeries.create({
+      data: {
+        businessId: cutAndShave.id,
+        locationId: location.id,
+        serviceId: haircut.id,
+        resourceId: resources[0].id,
+        customerId: annaCustomer.id,
+        customerUserId: anna.id,
+        intervalWeeks: 4,
+        weekday: (seriesStart.getUTCDay() + 6) % 7,
+        startMinute: hhmm(11),
+        startDate: seriesStart,
+        occurrences: 6,
+        note: "Stały termin — co miesiąc",
+      },
+    });
+  }
+
+  await prisma.webhook.create({
+    data: {
+      businessId: cutAndShave.id,
+      url: "https://example.com/planner/webhook",
+      secret: "whsec_demo_0123456789abcdef",
+      events: ["booking.created", "booking.cancelled"],
+      description: "Integracja z systemem kasowym (demo)",
+    },
+  });
+
+  await prisma.apiKey.create({
+    data: {
+      businessId: cutAndShave.id,
+      name: "Integracja demo",
+      prefix: "pk_demo_a1b2",
+      // Hash losowego klucza — pełny klucz pokazywany jest tylko przy tworzeniu.
+      keyHash: await bcrypt.hash("pk_demo_a1b2_sekretny_klucz_demo", 10),
+    },
+  });
+
+  // Zgłoszenie nadużycia — na opinii, do obsłużenia w panelu admina.
+  const someReview = await prisma.review.findFirst({
+    where: { businessId: cutAndShave.id },
+    select: { id: true },
+  });
+  if (someReview) {
+    await prisma.abuseReport.create({
+      data: {
+        reporterUserId: clientUsers[1].id,
+        targetType: "REVIEW",
+        targetId: someReview.id,
+        reason: "Nieprawdziwa opinia",
+        details:
+          "Ta osoba nigdy nie była w tym salonie — opinia wygląda na wystawioną przez konkurencję.",
+      },
+    });
+  }
+
+  await prisma.abuseReport.create({
+    data: {
+      reporterEmail: "zgloszenie@example.com",
+      targetType: "BUSINESS",
+      targetId: pending.id,
+      reason: "Podejrzane dane firmy",
+      details: "Adres wygląda na nieistniejący, telefon nie odpowiada.",
+      status: "IN_REVIEW",
+    },
+  });
+
+  // Wszystkie działające firmy oznaczamy jako zweryfikowane (poza oczekującą).
+  await prisma.business.updateMany({
+    where: { status: "ACTIVE", verifiedAt: null },
+    data: { verifiedAt: new Date(Date.now() - 30 * DAY_MS) },
+  });
 }
 
 main()

@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { useTranslations } from "@/i18n/client";
+import type { MessageKey } from "@/i18n";
 import { registerAction, type AuthFormState } from "./actions";
 
 const initialState: AuthFormState = { error: null };
@@ -18,22 +20,23 @@ type AccountType = "klient" | "firma";
 
 const accountTypes: Array<{
   value: AccountType;
-  title: string;
-  description: string;
+  title: MessageKey;
+  description: MessageKey;
 }> = [
   {
     value: "klient",
-    title: "Klient",
-    description: "Rezerwuję wizyty i usługi",
+    title: "auth.register.clientTitle",
+    description: "auth.register.clientDesc",
   },
   {
     value: "firma",
-    title: "Firma",
-    description: "Przyjmuję rezerwacje klientów",
+    title: "auth.register.businessTitle",
+    description: "auth.register.businessDesc",
   },
 ];
 
 export function RegisterForm() {
+  const { t } = useTranslations();
   const [state, formAction, pending] = useActionState(
     registerAction,
     initialState,
@@ -42,12 +45,12 @@ export function RegisterForm() {
 
   return (
     <div>
-      <div className="meta-label">REJESTRACJA</div>
+      <div className="meta-label">{t("auth.register.label")}</div>
       <h1 className="mt-1.5 font-display text-[28px] leading-none font-extrabold tracking-tight md:text-[32px]">
-        Załóż konto.
+        {t("auth.register.title")}
       </h1>
       <p className="mt-2 text-[13px] text-muted-foreground">
-        Wybierz typ konta i podaj swoje dane — zajmie to chwilę.
+        {t("auth.register.subtitle")}
       </p>
 
       <div className="mt-5 rounded-2xl border-[1.5px] border-border-strong bg-card p-5 sm:p-6">
@@ -66,7 +69,7 @@ export function RegisterForm() {
           {/* Karty wyboru: 1 kolumna na telefonie, 2 kolumny od sm. */}
           <div
             role="radiogroup"
-            aria-label="Typ konta"
+            aria-label={t("auth.register.typeAria")}
             className="grid grid-cols-1 gap-2.5 sm:grid-cols-2"
           >
             {accountTypes.map((option) => {
@@ -87,7 +90,7 @@ export function RegisterForm() {
                 >
                   <span className="flex items-center justify-between gap-2">
                     <span className="text-[14px] font-bold">
-                      {option.title}
+                      {t(option.title)}
                     </span>
                     <span
                       aria-hidden
@@ -104,7 +107,7 @@ export function RegisterForm() {
                     </span>
                   </span>
                   <span className="mt-1 block text-[12px] leading-snug text-muted-foreground">
-                    {option.description}
+                    {t(option.description)}
                   </span>
                 </button>
               );
@@ -116,7 +119,7 @@ export function RegisterForm() {
               htmlFor="name"
               className="text-[11px] font-semibold text-muted-foreground"
             >
-              Imię i nazwisko
+              {t("auth.name")}
             </Label>
             <Input
               id="name"
@@ -125,7 +128,7 @@ export function RegisterForm() {
               autoComplete="name"
               required
               minLength={3}
-              placeholder="Anna Kruk"
+              placeholder={t("auth.namePlaceholder")}
               className={inputClassName}
             />
           </div>
@@ -135,7 +138,7 @@ export function RegisterForm() {
               htmlFor="email"
               className="text-[11px] font-semibold text-muted-foreground"
             >
-              E-mail
+              {t("auth.email")}
             </Label>
             <Input
               id="email"
@@ -153,9 +156,9 @@ export function RegisterForm() {
               htmlFor="password"
               className="text-[11px] font-semibold text-muted-foreground"
             >
-              Hasło{" "}
+              {t("auth.password")}{" "}
               <span className="font-normal text-muted-foreground/70">
-                · min. 8 znaków
+                {t("auth.passwordHint")}
               </span>
             </Label>
             <Input
@@ -175,18 +178,18 @@ export function RegisterForm() {
             disabled={pending}
             className="mt-1 h-auto w-full rounded-full px-4 py-3 text-[14px] font-bold"
           >
-            {pending ? "Tworzenie konta…" : "Załóż konto"}
+            {pending ? t("auth.register.pending") : t("auth.register.submit")}
           </Button>
         </form>
       </div>
 
       <p className="mt-4 text-center text-[13px] text-muted-foreground">
-        Masz już konto?{" "}
+        {t("auth.register.haveAccount")}{" "}
         <Link
           href="/login"
           className="font-semibold text-foreground underline underline-offset-4"
         >
-          Zaloguj się
+          {t("auth.register.loginLink")}
         </Link>
       </p>
     </div>

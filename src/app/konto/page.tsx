@@ -19,8 +19,17 @@ import {
   formatPrice,
 } from "@/components/marketplace/format";
 import { UserMenu } from "@/components/auth/user-menu";
+import {
+  PACKAGE_STATUS_CLASSES,
+  effectivePackageStatus,
+  entriesLeft,
+  expireCustomerPackages,
+} from "@/lib/packages";
 import { CancelBookingDialog } from "@/components/konto/cancel-booking-dialog";
 import { ReviewForm } from "@/components/konto/review-form";
+import { LocaleProvider } from "@/i18n/client";
+import { getTranslations } from "@/i18n/server";
+import { INTL_LOCALE, type Translations } from "@/i18n";
 import { removeFavoriteAction } from "./actions";
 import {
   OPEN_BOOKING_STATUSES,
@@ -28,22 +37,22 @@ import {
   isReviewable,
 } from "./booking-status";
 
-export const metadata: Metadata = {
-  title: "Moje wizyty — Planner",
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const { t } = await getTranslations();
+  return { title: t("konto.metaTitle") };
+}
 
 // Listy zależą od sesji i od „teraz" — strona zawsze dynamiczna.
 export const dynamic = "force-dynamic";
 
-const statusBadge: Record<BookingStatus, { label: string; className: string }> =
-  {
-    PENDING: { label: "OCZEKUJE", className: "bg-warning-soft text-warning-strong" },
-    CONFIRMED: { label: "POTWIERDZONA", className: "bg-success-soft text-success" },
-    COMPLETED: { label: "ZAKOŃCZONA", className: "bg-secondary text-foreground/70" },
-    CANCELLED_BY_CUSTOMER: { label: "ODWOŁANA", className: "bg-muted text-muted-foreground" },
-    CANCELLED_BY_BUSINESS: { label: "ODWOŁANA PRZEZ FIRMĘ", className: "bg-destructive/10 text-destructive" },
-    NO_SHOW: { label: "NIEOBECNOŚĆ", className: "bg-destructive/10 text-destructive" },
-  };
+const STATUS_BADGE_CLASSES: Record<BookingStatus, string> = {
+  PENDING: "bg-warning-soft text-warning-strong",
+  CONFIRMED: "bg-success-soft text-success",
+  COMPLETED: "bg-secondary text-foreground/70",
+  CANCELLED_BY_CUSTOMER: "bg-muted text-muted-foreground",
+  CANCELLED_BY_BUSINESS: "bg-destructive/10 text-destructive",
+  NO_SHOW: "bg-destructive/10 text-destructive",
+};
 
 const bookingSelect = {
   id: true,
@@ -89,26 +98,28 @@ type KontoBooking = {
 const tabTriggerClass =
   "flex-none px-0 text-[13px] font-medium text-[#8f8b81] data-active:font-bold data-active:text-foreground rounded-none border-0 pb-2 after:bottom-0 after:h-[2.5px]";
 
-function StatusBadge({ status }: { status: BookingStatus }) {
-  const badge = statusBadge[status];
+function StatusBadge({
+  status,
+  t,
+}: {
+  status: BookingStatus;
+  t: Translations["t"];
+}) {
   return (
     <span
       className={cn(
         "inline-flex h-auto flex-none items-center rounded-md px-2 py-1 font-mono text-[10px] tracking-wide",
-        badge.className,
+        STATUS_BADGE_CLASSES[status],
       )}
     >
-      {badge.label}
+      {t(`konto.status.${status}`)}
     </span>
   );
 }
 
-function Stars({ rating }: { rating: number }) {
+function Stars({ rating, label }: { rating: number; label: string }) {
   return (
-    <span
-      aria-label={`Ocena ${rating} z 5`}
-      className="font-mono text-[14px] tracking-[0.1em]"
-    >
+    <span aria-label={label} className="font-mono text-[14px] tracking-[0.1em]">
       {[1, 2, 3, 4, 5].map((value) => (
         <span
           key={value}
@@ -123,7 +134,14 @@ function Stars({ rating }: { rating: number }) {
 }
 
 /** Wspólny szkielet karty wizyty: firma, usługa, pracownik, termin, cena. */
-function BookingSummary({ booking }: { booking: KontoBooking }) {
+function BookingSummary({
+  booking,
+  tr,
+}: {
+  booking: KontoBooking;
+  tr: Translations;
+}) {
+  const { locale, t } = tr;
   const serviceNames = booking.items
     .map((item) => item.service.name)
     .join(" + ");
@@ -140,17 +158,17 @@ function BookingSummary({ booking }: { booking: KontoBooking }) {
         >
           {booking.business.name}
         </Link>
-        <StatusBadge status={booking.status} />
+        <StatusBadge status={booking.status} t={t} />
       </div>
       <div className="mt-1 text-[13px] text-foreground/80">
-        {serviceNames || "Usługa"}
+        {serviceNames || t("konto.serviceFallback")}
         {staffNames ? (
           <span className="text-muted-foreground">{` · ${staffNames}`}</span>
         ) : null}
       </div>
       <div className="mt-1.5 font-mono text-[12.5px] text-muted-foreground">
-        {formatDateTimeLabel(booking.startAt, booking.location.timezone)} ·{" "}
-        {formatPrice(booking.totalPriceCents, booking.currency)}
+        {formatDateTimeLabel(booking.startAt, booking.location.timezone, locale)}{" "}
+        · {formatPrice(booking.totalPriceCents, booking.currency, locale)}
       </div>
     </div>
   );
@@ -189,10 +207,17 @@ export default async function KontoPage() {
   const session = await auth();
   if (!session?.user?.id) redirect("/login");
 
+  const tr = await getTranslations();
+  const { locale, t, tp } = tr;
+
   const userId = session.user.id;
   const now = new Date();
 
-  const [upcoming, past, favorites] = await Promise.all([
+  // Karnet wygasa samym upływem czasu — domykamy status przed listowaniem,
+  // żeby konto klienta i panel firmy pokazywały to samo.
+  await expireCustomerPackages(prisma, { customerUserId: userId }, now);
+
+  const [upcoming, past, favorites, packages] = await Promise.all([
     prisma.booking.findMany({
       where: {
         customerUserId: userId,
@@ -240,6 +265,32 @@ export default async function KontoPage() {
         },
       },
     }),
+    prisma.customerPackage.findMany({
+      where: { customer: { userId } },
+      orderBy: [{ status: "asc" }, { expiresAt: "asc" }],
+      select: {
+        id: true,
+        status: true,
+        entriesTotal: true,
+        entriesUsed: true,
+        expiresAt: true,
+        business: {
+          select: {
+            name: true,
+            slug: true,
+            // Ważność karnetu pokazujemy w strefie lokalu, nie przeglądarki.
+            locations: {
+              take: 1,
+              orderBy: { createdAt: "asc" },
+              select: { timezone: true },
+            },
+          },
+        },
+        package: {
+          select: { name: true, service: { select: { name: true } } },
+        },
+      },
+    }),
   ]);
 
   // Ocena ulubionych z agregatu — wcześniej strona ściągała komplet opinii
@@ -260,8 +311,8 @@ export default async function KontoPage() {
   const firstName = session.user.name?.trim().split(/\s+/)[0] ?? null;
 
   return (
-    <>
-      <SiteHeader />
+    <LocaleProvider locale={locale}>
+      <SiteHeader locale={locale} />
       <main className="mx-auto w-full max-w-md px-5 pt-4 pb-16 md:max-w-2xl lg:max-w-3xl lg:pt-8">
         {/* Telefon/tablet: site-header jest ukryty — logo i menu użytkownika
             (z wylogowaniem) muszą być dostępne w obrębie strony. */}
@@ -273,6 +324,7 @@ export default async function KontoPage() {
             Planner
           </Link>
           <UserMenu
+            locale={locale}
             user={{
               name: session.user.name,
               email: session.user.email,
@@ -281,9 +333,9 @@ export default async function KontoPage() {
           />
         </div>
 
-        <div className="meta-label">Twoje konto</div>
+        <div className="meta-label">{t("konto.accountLabel")}</div>
         <h1 className="mt-1.5 font-display text-[30px] leading-none font-extrabold tracking-tight md:text-[36px]">
-          {firstName ? `Cześć, ${firstName}.` : "Cześć."}
+          {firstName ? t("konto.hi", { name: firstName }) : t("konto.hiNoName")}
         </h1>
 
         <Tabs defaultValue="nadchodzace" className="mt-6">
@@ -292,19 +344,25 @@ export default async function KontoPage() {
             className="h-auto w-full justify-start gap-5 overflow-x-auto rounded-none border-b border-[#e2ddd2] p-0"
           >
             <TabsTrigger value="nadchodzace" className={tabTriggerClass}>
-              Nadchodzące
+              {t("konto.tab.upcoming")}
               <span className="font-mono text-[11px] font-normal text-muted-foreground">
                 {upcoming.length}
               </span>
             </TabsTrigger>
             <TabsTrigger value="minione" className={tabTriggerClass}>
-              Minione
+              {t("konto.tab.past")}
               <span className="font-mono text-[11px] font-normal text-muted-foreground">
                 {past.length}
               </span>
             </TabsTrigger>
+            <TabsTrigger value="karnety" className={tabTriggerClass}>
+              {t("konto.tab.packages")}
+              <span className="font-mono text-[11px] font-normal text-muted-foreground">
+                {packages.length}
+              </span>
+            </TabsTrigger>
             <TabsTrigger value="ulubione" className={tabTriggerClass}>
-              Ulubione
+              {t("konto.tab.favorites")}
               <span className="font-mono text-[11px] font-normal text-muted-foreground">
                 {favorites.length}
               </span>
@@ -315,9 +373,9 @@ export default async function KontoPage() {
           <TabsContent value="nadchodzace" className="mt-5">
             {upcoming.length === 0 ? (
               <EmptyState
-                title="Nic nie zaplanowane."
-                description="Nie masz nadchodzących wizyt. Znajdź wolny termin i zarezerwuj online."
-                cta={{ href: "/", label: "Znajdź termin" }}
+                title={t("konto.empty.upcomingTitle")}
+                description={t("konto.empty.upcomingText")}
+                cta={{ href: "/", label: t("konto.empty.upcomingCta") }}
               />
             ) : (
               <div className="flex flex-col gap-3">
@@ -327,7 +385,7 @@ export default async function KontoPage() {
                     className="rounded-2xl border-[1.5px] border-border-strong bg-card p-4 md:p-5"
                   >
                     <div className="md:flex md:items-start md:justify-between md:gap-4">
-                      <BookingSummary booking={booking} />
+                      <BookingSummary booking={booking} tr={tr} />
                       <div className="mt-3 flex flex-col gap-1.5 md:mt-0 md:flex-none md:items-end">
                         <CancelBookingDialog
                           bookingId={booking.id}
@@ -335,13 +393,14 @@ export default async function KontoPage() {
                           dateLabel={formatDateTimeLabel(
                             booking.startAt,
                             booking.location.timezone,
+                            locale,
                           )}
                           cutoffHours={booking.location.cancellationCutoffHours}
                         />
                         <span className="font-mono text-[10.5px] text-muted-foreground md:text-right">
-                          bezpłatnie do{" "}
-                          {booking.location.cancellationCutoffHours} h przed
-                          wizytą
+                          {t("konto.cancelFreeUntil", {
+                            hours: booking.location.cancellationCutoffHours,
+                          })}
                         </span>
                       </div>
                     </div>
@@ -355,8 +414,8 @@ export default async function KontoPage() {
           <TabsContent value="minione" className="mt-5">
             {past.length === 0 ? (
               <EmptyState
-                title="Jeszcze nic tu nie ma."
-                description="Historia wizyt pojawi się po pierwszej zakończonej rezerwacji."
+                title={t("konto.empty.pastTitle")}
+                description={t("konto.empty.pastText")}
               />
             ) : (
               <div className="flex flex-col gap-3">
@@ -370,12 +429,12 @@ export default async function KontoPage() {
                       className="rounded-2xl border border-border bg-card p-4 md:p-5"
                     >
                       <div className="md:flex md:items-start md:justify-between md:gap-4">
-                        <BookingSummary booking={booking} />
+                        <BookingSummary booking={booking} tr={tr} />
                         <Link
                           href={rebookHref}
                           className="mt-3 inline-flex min-h-11 flex-none items-center justify-center rounded-full border-[1.5px] border-border-strong bg-card px-4 text-[13px] font-semibold transition-colors hover:bg-muted md:mt-0"
                         >
-                          Zarezerwuj ponownie
+                          {t("konto.rebook")}
                         </Link>
                       </div>
 
@@ -383,8 +442,15 @@ export default async function KontoPage() {
                         booking.review ? (
                           <div className="mt-3 rounded-xl border border-border bg-background/60 p-3.5">
                             <div className="flex items-center gap-2">
-                              <Stars rating={booking.review.rating} />
-                              <span className="meta-label">Twoja opinia</span>
+                              <Stars
+                                rating={booking.review.rating}
+                                label={t("konto.ratingAria", {
+                                  rating: booking.review.rating,
+                                })}
+                              />
+                              <span className="meta-label">
+                                {t("konto.yourReview")}
+                              </span>
                             </div>
                             {booking.review.comment ? (
                               <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/80">
@@ -394,7 +460,7 @@ export default async function KontoPage() {
                             {booking.review.reply ? (
                               <div className="mt-2.5 rounded-lg bg-muted px-3 py-2.5">
                                 <div className="meta-label">
-                                  Odpowiedź firmy
+                                  {t("konto.businessReply")}
                                 </div>
                                 <p className="mt-1 text-[12.5px] leading-relaxed text-foreground/80">
                                   {booking.review.reply}
@@ -413,13 +479,106 @@ export default async function KontoPage() {
             )}
           </TabsContent>
 
+          {/* MOJE KARNETY */}
+          <TabsContent value="karnety" className="mt-5">
+            {packages.length === 0 ? (
+              <EmptyState
+                title={t("konto.empty.packagesTitle")}
+                description={t("konto.empty.packagesText")}
+                cta={{ href: "/", label: t("konto.empty.packagesCta") }}
+              />
+            ) : (
+              <div className="flex flex-col gap-3 md:grid md:grid-cols-2 md:gap-4">
+                {packages.map((entry) => {
+                  const status = effectivePackageStatus(entry, now);
+                  const left = entriesLeft(entry);
+                  const timezone =
+                    entry.business.locations[0]?.timezone ?? "Europe/Warsaw";
+                  const expiresLabel = new Intl.DateTimeFormat(
+                    INTL_LOCALE[locale],
+                    {
+                      timeZone: timezone,
+                      day: "2-digit",
+                      month: "2-digit",
+                      year: "numeric",
+                    },
+                  ).format(entry.expiresAt);
+                  return (
+                    <article
+                      key={entry.id}
+                      className={cn(
+                        "rounded-2xl border bg-card p-4 md:p-5",
+                        status === "ACTIVE"
+                          ? "border-[1.5px] border-border-strong"
+                          : "border-border opacity-70",
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate font-display text-[17px] leading-tight font-bold tracking-tight">
+                            {entry.package.name}
+                          </div>
+                          <Link
+                            href={`/b/${entry.business.slug}`}
+                            className="mt-0.5 block truncate text-[13px] text-muted-foreground transition-colors hover:text-primary"
+                          >
+                            {entry.business.name}
+                          </Link>
+                        </div>
+                        <span
+                          className={cn(
+                            "inline-flex flex-none items-center rounded-md px-2 py-1 font-mono text-[10px] tracking-wide uppercase",
+                            PACKAGE_STATUS_CLASSES[status],
+                          )}
+                        >
+                          {t(`konto.package.status.${status}`)}
+                        </span>
+                      </div>
+
+                      <div className="mt-3 flex items-baseline gap-2">
+                        <span className="font-display text-[30px] leading-none font-extrabold tracking-tight">
+                          {left}
+                        </span>
+                        <span className="font-mono text-[12px] text-muted-foreground">
+                          {tp("konto.package.left", entry.entriesTotal, {
+                            total: entry.entriesTotal,
+                          })}
+                        </span>
+                      </div>
+
+                      {/* Pasek wykorzystania — czytelny na każdym rozmiarze */}
+                      <div className="mt-2.5 h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div
+                          className="h-full rounded-full bg-primary"
+                          style={{
+                            width: `${Math.round((entry.entriesUsed / Math.max(1, entry.entriesTotal)) * 100)}%`,
+                          }}
+                        />
+                      </div>
+
+                      <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11.5px] text-muted-foreground">
+                        <span>
+                          {t("konto.package.validUntil", { date: expiresLabel })}
+                        </span>
+                        <span>
+                          {entry.package.service?.name ??
+                            t("konto.package.anyService")}
+                        </span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </TabsContent>
+
           {/* ULUBIONE */}
           <TabsContent value="ulubione" className="mt-5">
             {favorites.length === 0 ? (
               <EmptyState
-                title="Brak ulubionych."
-                description="Zapisuj firmy serduszkiem, żeby mieć je zawsze pod ręką."
-                cta={{ href: "/", label: "Przeglądaj firmy" }}
+                title={t("konto.empty.favoritesTitle")}
+                description={t("konto.empty.favoritesText")}
+                cta={{ href: "/", label: t("konto.empty.favoritesCta") }}
               />
             ) : (
               <div className="flex flex-col gap-3 md:grid md:grid-cols-2 md:gap-4">
@@ -431,6 +590,7 @@ export default async function KontoPage() {
                   const rating = ratingFromAggregate(
                     aggregate?._avg.rating ?? null,
                     aggregate?._count._all ?? 0,
+                    locale,
                   );
                   return (
                     <article
@@ -461,8 +621,10 @@ export default async function KontoPage() {
                         />
                         <button
                           type="submit"
-                          aria-label={`Usuń ${favorite.business.name} z ulubionych`}
-                          title="Usuń z ulubionych"
+                          aria-label={t("konto.removeFavoriteAria", {
+                            name: favorite.business.name,
+                          })}
+                          title={t("konto.removeFavoriteTitle")}
                           className="flex size-11 flex-none cursor-pointer items-center justify-center rounded-full border border-border text-[18px] text-destructive transition-colors hover:bg-destructive/10"
                         >
                           ♥
@@ -476,6 +638,6 @@ export default async function KontoPage() {
           </TabsContent>
         </Tabs>
       </main>
-    </>
+    </LocaleProvider>
   );
 }

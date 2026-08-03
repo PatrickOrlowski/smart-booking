@@ -3,11 +3,14 @@ import { redirect } from "next/navigation";
 
 import { auth } from "@/lib/auth";
 import { roleHomePath } from "@/components/auth/paths";
+import { LocaleProvider } from "@/i18n/client";
+import { getTranslations } from "@/i18n/server";
 import { LoginForm } from "./login-form";
 
-export const metadata: Metadata = {
-  title: "Logowanie — Planner",
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const { t } = await getTranslations();
+  return { title: t("auth.login.metaTitle") };
+}
 
 export default async function LoginPage() {
   const session = await auth();
@@ -15,5 +18,11 @@ export default async function LoginPage() {
     redirect(roleHomePath(session.user.role));
   }
 
-  return <LoginForm />;
+  const { locale } = await getTranslations();
+
+  return (
+    <LocaleProvider locale={locale}>
+      <LoginForm />
+    </LocaleProvider>
+  );
 }

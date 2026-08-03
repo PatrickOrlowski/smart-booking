@@ -164,6 +164,47 @@ enum ServiceKind {
   TABLE_RESERVATION
 }
 
+// --- Faza 8: dojrzałość platformy ---
+
+enum DiscountType {
+  /// value = procent (1-100)
+  PERCENT
+  /// value = kwota w groszach
+  AMOUNT
+}
+
+enum PackageStatus {
+  ACTIVE
+  EXPIRED
+  USED_UP
+  CANCELLED
+}
+
+enum SeriesStatus {
+  ACTIVE
+  FINISHED
+  CANCELLED
+}
+
+enum ReportTargetType {
+  BUSINESS
+  REVIEW
+  USER
+}
+
+enum ReportStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  REJECTED
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
 // ---------------------------------------------------------------------------
 // Auth.js (Prisma adapter)
 // ---------------------------------------------------------------------------
@@ -182,13 +223,18 @@ model User {
 
   accounts         Account[]
   sessions         Session[]
-  ownedBusinesses  Business[]      @relation("BusinessOwner")
+  ownedBusinesses  Business[]     @relation("BusinessOwner")
   staffProfiles    StaffProfile[]
-  bookings         Booking[]       @relation("BookingCustomer")
+  bookings         Booking[]      @relation("BookingCustomer")
   customerProfiles Customer[]
-  reviews          Review[]
-  favorites        Favorite[]
-  waitlistEntries  WaitlistEntry[]
+  /// Preferowany język interfejsu (faza 8). null = wykrywany z przeglądarki.
+  locale           String?        @db.VarChar(5)
+
+  reviews         Review[]
+  favorites       Favorite[]
+  waitlistEntries WaitlistEntry[]
+  abuseReports    AbuseReport[]   @relation("AbuseReporter")
+  resolvedReports AbuseReport[]   @relation("AbuseResolver")
 
   @@map("users")
 }
@@ -255,6 +301,16 @@ model Business {
   /// Po ilu nieodwołanych nieobecnościach klient jest blokowany w tej firmie.
   noShowLimit Int @default(3) @map("no_show_limit")
 
+  /// --- Weryfikacja przez platformę (faza 8) ---
+  verifiedAt       DateTime? @map("verified_at") @db.Timestamptz(3)
+  verifiedByUserId String?   @map("verified_by_user_id")
+  /// Powód odrzucenia zgłoszenia — pokazywany właścicielowi w panelu.
+  rejectionReason  String?   @map("rejection_reason")
+
+  /// Język treści i waluta cennika firmy.
+  defaultLocale String @default("pl") @map("default_locale")
+  currency      String @default("PLN")
+
   owner        User              @relation("BusinessOwner", fields: [ownerId], references: [id])
   locations    Location[]
   staff        StaffProfile[]
@@ -267,6 +323,13 @@ model Business {
   payments     Payment[]
   subscription Subscription?
   waitlist     WaitlistEntry[]
+
+  discountCodes    DiscountCode[]
+  servicePackages  ServicePackage[]
+  customerPackages CustomerPackage[]
+  bookingSeries    BookingSeries[]
+  webhooks         Webhook[]
+  apiKeys          ApiKey[]
 
   @@index([ownerId])
   @@index([status, type])
@@ -383,6 +446,7 @@ model Resource {
   bookingItems BookingItem[]
   holds        Hold[]
   combinations TableCombinationMember[]
+  series       BookingSeries[]
 
   @@index([locationId, type])
   @@index([roomId])
@@ -501,6 +565,8 @@ model Service {
   business     Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
   category     ServiceCategory?  @relation(fields: [categoryId], references: [id])
   resources    ServiceResource[]
+  packages     ServicePackage[]
+  series       BookingSeries[]
   bookingItems BookingItem[]
 
   @@index([businessId, isActive])
@@ -540,17 +606,25 @@ model Booking {
   guestEmail     String? @map("guest_email")
   guestPhone     String? @map("guest_phone")
 
-  status          BookingStatus @default(PENDING)
-  source          BookingSource @default(WEB_MARKETPLACE)
+  status BookingStatus @default(PENDING)
+  source BookingSource @default(WEB_MARKETPLACE)
+
+  /// --- Rabaty i karnety (faza 8) ---
+  /// Kwota rabatu w groszach, już odjęta od totalPriceCents.
+  discountCents     Int      @default(0) @map("discount_cents")
+  discountCodeId    String?  @map("discount_code_id")
+  customerPackageId String?  @map("customer_package_id")
+  /// Rezerwacja wygenerowana z serii cyklicznej.
+  seriesId          String?  @map("series_id")
   /// Zakres całej wizyty (od pierwszej do ostatniej pozycji, bez buforów).
-  startAt         DateTime      @map("start_at") @db.Timestamptz(3)
-  endAt           DateTime      @map("end_at") @db.Timestamptz(3)
-  totalPriceCents Int           @map("total_price_cents")
-  currency        String        @default("PLN")
+  startAt           DateTime @map("start_at") @db.Timestamptz(3)
+  endAt             DateTime @map("end_at") @db.Timestamptz(3)
+  totalPriceCents   Int      @map("total_price_cents")
+  currency          String   @default("PLN")
   /// Liczba osób — używane przez rezerwacje stolików (faza 7).
-  partySize       Int?          @map("party_size")
-  customerNote    String?       @map("customer_note")
-  internalNote    String?       @map("internal_note")
+  partySize         Int?     @map("party_size")
+  customerNote      String?  @map("customer_note")
+  internalNote      String?  @map("internal_note")
 
   cancelledAt        DateTime? @map("cancelled_at") @db.Timestamptz(3)
   cancellationReason String?   @map("cancellation_reason")
@@ -566,6 +640,12 @@ model Booking {
   notifications Notification[]
   payments      Payment[]
   waitlistEntry WaitlistEntry?
+
+  discountCode    DiscountCode?       @relation(fields: [discountCodeId], references: [id])
+  customerPackage CustomerPackage?    @relation(fields: [customerPackageId], references: [id])
+  series          BookingSeries?      @relation(fields: [seriesId], references: [id], onDelete: SetNull)
+  redemption      DiscountRedemption?
+  packageUsage    PackageUsage?
 
   @@index([businessId, startAt])
   @@index([locationId, startAt])
@@ -652,10 +732,12 @@ model Customer {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  business Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  user     User?           @relation(fields: [userId], references: [id])
+  business Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user     User?             @relation(fields: [userId], references: [id])
   bookings Booking[]
   waitlist WaitlistEntry[]
+  packages CustomerPackage[]
+  series   BookingSeries[]
 
   @@unique([businessId, userId])
   @@index([businessId, phone])
@@ -794,6 +876,263 @@ model WaitlistEntry {
   @@index([locationId, status, requestedAt])
   @@index([businessId, status])
   @@map("waitlist_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Dojrzałość platformy: rabaty, karnety, serie, moderacja, integracje (faza 8)
+// ---------------------------------------------------------------------------
+
+/// Kod rabatowy firmy. Rabat jest naliczany przy tworzeniu rezerwacji
+/// i utrwalany w Booking.discountCents — późniejsza zmiana kodu nie rusza
+/// już wystawionych rezerwacji.
+model DiscountCode {
+  id          String       @id @default(cuid())
+  businessId  String       @map("business_id")
+  code        String
+  description String?
+  type        DiscountType @default(PERCENT)
+  /// PERCENT: 1-100. AMOUNT: kwota w groszach.
+  value       Int
+
+  /// Minimalna wartość rezerwacji, od której kod działa.
+  minAmountCents     Int?      @map("min_amount_cents")
+  /// null = bez limitu użyć.
+  maxUses            Int?      @map("max_uses")
+  maxUsesPerCustomer Int       @default(1) @map("max_uses_per_customer")
+  /// Licznik utrwalony — źródłem prawdy przy sporze są wiersze redemptions.
+  usedCount          Int       @default(0) @map("used_count")
+  validFrom          DateTime? @map("valid_from") @db.Timestamptz(3)
+  validTo            DateTime? @map("valid_to") @db.Timestamptz(3)
+  isActive           Boolean   @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business    Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  bookings    Booking[]
+  redemptions DiscountRedemption[]
+
+  @@unique([businessId, code])
+  @@index([businessId, isActive])
+  @@map("discount_codes")
+}
+
+/// Pojedyncze użycie kodu. Unikalność po bookingId gwarantuje, że jedna
+/// rezerwacja nie zużyje kodu dwa razy nawet przy równoległych żądaniach.
+model DiscountRedemption {
+  id             String   @id @default(cuid())
+  discountCodeId String   @map("discount_code_id")
+  bookingId      String   @unique @map("booking_id")
+  customerId     String?  @map("customer_id")
+  amountCents    Int      @map("amount_cents")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  discountCode DiscountCode @relation(fields: [discountCodeId], references: [id], onDelete: Cascade)
+  booking      Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([discountCodeId, customerId])
+  @@map("discount_redemptions")
+}
+
+/// Karnet oferowany przez firmę, np. „10 strzyżeń w cenie 8".
+model ServicePackage {
+  id          String  @id @default(cuid())
+  businessId  String  @map("business_id")
+  name        String
+  description String?
+  /// null = karnet na dowolną usługę firmy.
+  serviceId   String? @map("service_id")
+
+  entries      Int
+  priceCents   Int     @map("price_cents")
+  /// Ważność w dniach od zakupu.
+  validityDays Int     @default(365) @map("validity_days")
+  isActive     Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  service  Service?          @relation(fields: [serviceId], references: [id])
+  sold     CustomerPackage[]
+
+  @@index([businessId, isActive])
+  @@map("service_packages")
+}
+
+/// Karnet kupiony przez konkretnego klienta.
+model CustomerPackage {
+  id         String @id @default(cuid())
+  packageId  String @map("package_id")
+  businessId String @map("business_id")
+  customerId String @map("customer_id")
+
+  entriesTotal Int           @map("entries_total")
+  entriesUsed  Int           @default(0) @map("entries_used")
+  status       PackageStatus @default(ACTIVE)
+  purchasedAt  DateTime      @default(now()) @map("purchased_at") @db.Timestamptz(3)
+  expiresAt    DateTime      @map("expires_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  package  ServicePackage @relation(fields: [packageId], references: [id])
+  business Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+  usages   PackageUsage[]
+
+  @@index([businessId, status])
+  @@index([customerId, status])
+  @@map("customer_packages")
+}
+
+/// Wykorzystanie jednego wejścia z karnetu na konkretnej rezerwacji.
+model PackageUsage {
+  id                String   @id @default(cuid())
+  customerPackageId String   @map("customer_package_id")
+  bookingId         String   @unique @map("booking_id")
+  usedAt            DateTime @default(now()) @map("used_at") @db.Timestamptz(3)
+
+  customerPackage CustomerPackage @relation(fields: [customerPackageId], references: [id], onDelete: Cascade)
+  booking         Booking         @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([customerPackageId])
+  @@map("package_usages")
+}
+
+/// Seria rezerwacji cyklicznych („co 4 tygodnie, czwartek 17:00").
+/// Poszczególne wizyty to zwykłe Booking z seriesId — dzięki temu
+/// odwołanie jednej z nich nie rusza reszty.
+model BookingSeries {
+  id         String @id @default(cuid())
+  businessId String @map("business_id")
+  locationId String @map("location_id")
+  serviceId  String @map("service_id")
+  resourceId String @map("resource_id")
+
+  customerId     String? @map("customer_id")
+  customerUserId String? @map("customer_user_id")
+  guestName      String? @map("guest_name")
+  guestEmail     String? @map("guest_email")
+  guestPhone     String? @map("guest_phone")
+
+  /// Co ile tygodni powtarza się wizyta.
+  intervalWeeks Int       @default(4) @map("interval_weeks")
+  /// 0 = poniedziałek ... 6 = niedziela; czas ścienny w strefie lokalizacji.
+  weekday       Int
+  startMinute   Int       @map("start_minute")
+  startDate     DateTime  @map("start_date") @db.Date
+  /// Koniec serii — data albo liczba powtórzeń (co najmniej jedno musi być).
+  endDate       DateTime? @map("end_date") @db.Date
+  occurrences   Int?
+
+  status SeriesStatus @default(ACTIVE)
+  note   String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  service  Service   @relation(fields: [serviceId], references: [id])
+  resource Resource  @relation(fields: [resourceId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+  bookings Booking[]
+
+  @@index([businessId, status])
+  @@index([resourceId, status])
+  @@map("booking_series")
+}
+
+/// Zgłoszenie nadużycia — firma, opinia albo użytkownik.
+model AbuseReport {
+  id             String  @id @default(cuid())
+  reporterUserId String? @map("reporter_user_id")
+  reporterEmail  String? @map("reporter_email")
+
+  targetType ReportTargetType @map("target_type")
+  targetId   String           @map("target_id")
+  reason     String
+  details    String?
+
+  status           ReportStatus @default(OPEN)
+  resolutionNote   String?      @map("resolution_note")
+  resolvedByUserId String?      @map("resolved_by_user_id")
+  resolvedAt       DateTime?    @map("resolved_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  reporter User? @relation("AbuseReporter", fields: [reporterUserId], references: [id], onDelete: SetNull)
+  resolver User? @relation("AbuseResolver", fields: [resolvedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([targetType, targetId])
+  @@map("abuse_reports")
+}
+
+/// Webhook firmy — powiadomienia o zdarzeniach dla integratorów.
+model Webhook {
+  id          String   @id @default(cuid())
+  businessId  String   @map("business_id")
+  url         String
+  /// Sekret do podpisu HMAC nagłówka X-Planner-Signature.
+  secret      String
+  /// Nazwy zdarzeń, np. booking.created, booking.cancelled.
+  events      String[]
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business   Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+
+  @@index([businessId, isActive])
+  @@map("webhooks")
+}
+
+/// Pojedyncza próba dostarczenia zdarzenia — z ponowieniami i backoffem.
+model WebhookDelivery {
+  id        String @id @default(cuid())
+  webhookId String @map("webhook_id")
+  event     String
+  payload   Json
+
+  status         WebhookDeliveryStatus @default(PENDING)
+  attempts       Int                   @default(0)
+  responseStatus Int?                  @map("response_status")
+  lastError      String?               @map("last_error")
+  nextRetryAt    DateTime?             @map("next_retry_at") @db.Timestamptz(3)
+  deliveredAt    DateTime?             @map("delivered_at") @db.Timestamptz(3)
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextRetryAt])
+  @@index([webhookId, createdAt])
+  @@map("webhook_deliveries")
+}
+
+/// Klucz API integratora. Trzymamy wyłącznie hash — pełny klucz pokazujemy
+/// raz, w chwili utworzenia.
+model ApiKey {
+  id         String @id @default(cuid())
+  businessId String @map("business_id")
+  name       String
+  /// Widoczny prefiks do rozpoznania klucza na liście (np. „pk_live_a1b2").
+  prefix     String
+  keyHash    String @unique @map("key_hash")
+
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+  @@map("api_keys")
 }
 
 // ---------------------------------------------------------------------------

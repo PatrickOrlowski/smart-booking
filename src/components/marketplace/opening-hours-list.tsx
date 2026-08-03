@@ -1,4 +1,8 @@
-import { WEEKDAYS_LONG, minutesToLabel } from "@/components/marketplace/format";
+import {
+  minutesToLabel,
+  weekdaysLong,
+} from "@/components/marketplace/format";
+import { DEFAULT_LOCALE, createTranslator, type Locale } from "@/i18n";
 
 /**
  * Lista godzin otwarcia per dzień tygodnia — zakładka „Info" i sticky karta
@@ -6,12 +10,16 @@ import { WEEKDAYS_LONG, minutesToLabel } from "@/components/marketplace/format";
  */
 export function OpeningHoursList({
   openingHours,
+  locale = DEFAULT_LOCALE,
 }: {
   openingHours: { weekday: number; startMinute: number; endMinute: number }[];
+  locale?: Locale;
 }) {
+  const t = createTranslator(locale);
+
   return (
     <div className="flex flex-col gap-1.5">
-      {WEEKDAYS_LONG.map((dayName, weekday) => {
+      {weekdaysLong(locale).map((dayName, weekday) => {
         const blocks = openingHours.filter(
           (entry) => entry.weekday === weekday,
         );
@@ -20,7 +28,7 @@ export function OpeningHoursList({
             <span className="capitalize">{dayName}</span>
             <span className="font-mono text-muted-foreground">
               {blocks.length === 0
-                ? "zamknięte"
+                ? t("common.closed")
                 : blocks
                     .map(
                       (block) =>

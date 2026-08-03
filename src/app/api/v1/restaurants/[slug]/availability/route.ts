@@ -5,6 +5,7 @@ import {
   getRestaurantLocation,
   getTableAvailabilityRange,
   partyTooLargeMessage,
+  partyTooSmallMessage,
 } from "@/lib/restaurant-data";
 import type { TableSlot } from "@/lib/table-availability";
 
@@ -113,6 +114,21 @@ export async function GET(
     );
   }
 
+  // Symetrycznie do limitu górnego: grupa mniejsza niż najmniejszy stolik
+  // nigdy nie dostanie slotu, więc mówimy to wprost zamiast pokazywać
+  // „brak wolnych stolików" i listę oczekujących na dwa tygodnie.
+  if (partySize < context.minPartySizeSeatable) {
+    return NextResponse.json(
+      {
+        error: "PARTY_TOO_SMALL",
+        message: partyTooSmallMessage(context),
+        minPartySizeSeatable: context.minPartySizeSeatable,
+        phone: context.location.phone,
+      },
+      { status: 422 },
+    );
+  }
+
   const availability = await getTableAvailabilityRange({
     slug,
     context,
@@ -125,6 +141,27 @@ export async function GET(
     return NextResponse.json(
       { error: "NOT_FOUND", message: "Nie znaleziono restauracji" },
       { status: 404 },
+    );
+  }
+
+  // Tryb pastylki „Stolik dziś od 18:00" na listingach: jedna data w odpowiedzi
+  // zamiast kompletu slotów z trzech dni. Listing miasta montuje po jednym
+  // takim żądaniu NA KARTĘ, więc payload i tak trzeba ściąć, a 60-sekundowa
+  // pamięć na CDN pozwala je scalić między odwiedzającymi (godzina otwarcia
+  // stolika nie zmienia się co sekundę, a i tak rewaliduje ją zapis rezerwacji).
+  if (searchParams.get("nearest") === "1") {
+    const nearest =
+      availability.days.flatMap((day) => day.slots)[0]?.startAt ?? null;
+    return NextResponse.json(
+      {
+        timezone: context.location.timezone,
+        nearest: nearest ? nearest.toISOString() : null,
+      },
+      {
+        headers: {
+          "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300",
+        },
+      },
     );
   }
 

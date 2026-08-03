@@ -42,6 +42,12 @@ export type RestaurantBookingData = {
   maxAdvanceDays: number;
   maxPartySizeOnline: number | null;
   maxPartySizeSeatable: number;
+  /**
+   * Najmniejsza grupa, jaką lokal w ogóle sadza (najniższe `capacityMin`).
+   * Poniżej tej wartości silnik nigdy nie zwróci slotu — UI musi powiedzieć
+   * „nie sadzamy pojedynczych gości", a nie „brak wolnych stolików".
+   */
+  minPartySizeSeatable: number;
   waitlistEnabled: boolean;
   /**
    * „Teraz" z zegara serwera (ISO). Komponenty kliencie nie wolno czytać
@@ -75,6 +81,14 @@ export type PartyTooLargeResponse = {
   phone: string | null;
 };
 
+/** Odpowiedź 422 PARTY_TOO_SMALL — grupa mniejsza niż najmniejszy stolik. */
+export type PartyTooSmallResponse = {
+  error: "PARTY_TOO_SMALL";
+  message: string;
+  minPartySizeSeatable: number;
+  phone: string | null;
+};
+
 /** Rezerwacja zwrócona przez POST /api/v1/restaurants/[slug]/bookings. */
 export type TableBookingResult = {
   id: string;
@@ -95,7 +109,11 @@ export type TableBookingResult = {
   cancellationDeadline: string;
 };
 
-/** Czas zajęcia stolika dla liczby osób — ta sama reguła co w silniku. */
+/**
+ * Czas zajęcia stolika dla liczby osób — ta sama reguła co w silniku
+ * (`turnTimeForPartySize` w src/lib/table-availability.ts), łącznie z tym, że
+ * grupa większa od najwyższej reguły dostaje JEJ czas, a nie wartość domyślną.
+ */
 export function turnTimeFor(
   rules: RestaurantBookingData["turnTimeRules"],
   partySize: number,
@@ -105,5 +123,15 @@ export function turnTimeFor(
     (candidate) =>
       partySize >= candidate.partySizeMin && partySize <= candidate.partySizeMax,
   );
-  return rule?.durationMin ?? fallbackMin;
+  if (rule) return rule.durationMin;
+
+  const highest = rules.reduce<RestaurantBookingData["turnTimeRules"][number] | null>(
+    (best, candidate) =>
+      best === null || candidate.partySizeMax > best.partySizeMax
+        ? candidate
+        : best,
+    null,
+  );
+  if (highest && partySize > highest.partySizeMax) return highest.durationMin;
+  return fallbackMin;
 }

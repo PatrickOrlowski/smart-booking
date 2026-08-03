@@ -26,6 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 import type { PriceType } from "@/generated/prisma/enums";
 import {
   formatMinutes,
@@ -36,6 +37,10 @@ import {
 } from "@/components/panel/format";
 import { createManualBookingAction } from "@/app/panel/(dashboard)/actions";
 import { matchCustomerAction } from "@/app/panel/(dashboard)/klienci/actions";
+import {
+  findCustomerPackagesAction,
+  type UsablePackageOption,
+} from "@/app/panel/(dashboard)/promocje/actions";
 
 export type BookingStaffOption = { id: string; name: string };
 
@@ -125,6 +130,47 @@ export function AddBookingDialog({
     };
   }, [open, businessId, customerPhone, customerEmail]);
 
+  // Karnety dopasowanego klienta obejmujące wybraną usługę. Sprawdzamy je
+  // dopiero po trafieniu w profil CRM — dla nowego gościa nie ma czego szukać.
+  // Wynik jest przypięty do klucza (klient + usługa), więc zmiana usługi
+  // unieważnia go bez synchronicznego setState w efekcie.
+  const matchId = match?.id ?? null;
+  const packageKey =
+    open && matchId && serviceId ? `${matchId}|${serviceId}` : null;
+  const [packageResult, setPackageResult] = useState<{
+    key: string;
+    rows: UsablePackageOption[];
+  } | null>(null);
+  const [pickedPackageId, setPickedPackageId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!packageKey || !matchId || !serviceId) return;
+    let cancelled = false;
+    void findCustomerPackagesAction({
+      businessId,
+      customerId: matchId,
+      serviceId,
+    }).then((result) => {
+      if (cancelled) return;
+      setPackageResult({
+        key: packageKey,
+        rows: result.ok ? result.packages : [],
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [packageKey, businessId, matchId, serviceId]);
+
+  const packages =
+    packageResult && packageResult.key === packageKey ? packageResult.rows : [];
+  // Wybór karnetu jest świadomą decyzją obsługi — nigdy nie zaznacza się sam,
+  // a po zmianie klienta/usługi przestaje obowiązywać.
+  const usePackageId =
+    pickedPackageId && packages.some((row) => row.id === pickedPackageId)
+      ? pickedPackageId
+      : null;
+
   const hasGuestContact =
     customerPhone.trim() !== "" || customerEmail.trim() !== "";
 
@@ -171,12 +217,15 @@ export function AddBookingDialog({
         customerPhone: customerPhone.trim() || undefined,
         customerEmail: customerEmail.trim() || undefined,
         note: note.trim() || undefined,
+        customerPackageId: usePackageId ?? undefined,
       });
       if (result.ok) {
         toast.success(
-          match
-            ? `Wizyta dodana — dopisana do klienta ${match.fullName}`
-            : "Wizyta dodana do kalendarza",
+          usePackageId
+            ? "Wizyta dodana — wejście skasowane z karnetu"
+            : match
+              ? `Wizyta dodana — dopisana do klienta ${match.fullName}`
+              : "Wizyta dodana do kalendarza",
         );
         setOpen(false);
         setCustomerName("");
@@ -186,6 +235,8 @@ export function AddBookingDialog({
         setStartMinute(null);
         setMatch(null);
         setMatchChecked(false);
+        setPackageResult(null);
+        setPickedPackageId(null);
         router.refresh();
       } else {
         toast.error(result.error);
@@ -286,7 +337,9 @@ export function AddBookingDialog({
               {override?.durationMin != null && " (nadpisany dla pracownika)"} ·
               cena{" "}
               <b className="font-mono">
-                {formatPrice(priceCents, service.currency, service.priceType)}
+                {usePackageId
+                  ? "0 zł (karnet)"
+                  : formatPrice(priceCents, service.currency, service.priceType)}
               </b>
             </div>
           )}
@@ -340,6 +393,43 @@ export function AddBookingDialog({
               nowy profil klienta.
             </p>
           ) : null}
+
+          {packages.length > 0 && (
+            <div className="rounded-xl border border-success-soft-border bg-success-soft px-3 py-2.5 dark:border-border dark:bg-muted">
+              <div className="meta-label">Karnet klienta</div>
+              <div className="mt-1.5 flex flex-col gap-1.5">
+                {packages.map((entry) => {
+                  const active = entry.id === usePackageId;
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      onClick={() =>
+                        setPickedPackageId(active ? null : entry.id)
+                      }
+                      className={cn(
+                        "flex min-h-11 w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-[12.5px] transition-colors",
+                        active
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-card text-foreground",
+                      )}
+                    >
+                      <span className="min-w-0 truncate font-semibold">
+                        {active ? "Wizyta z karnetu: " : "Użyj karnetu: "}
+                        {entry.packageName}
+                      </span>
+                      <span className="flex-none font-mono text-[11.5px]">
+                        zostało {entry.entriesLeft}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-1.5 text-[11px] leading-snug text-primary/80 dark:text-muted-foreground">
+                Wejście skasuje się przy zapisie wizyty, a cena zejdzie do 0 zł.
+              </p>
+            </div>
+          )}
 
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="booking-note">Notatka wewnętrzna (opcjonalnie)</Label>

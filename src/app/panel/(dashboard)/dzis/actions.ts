@@ -16,7 +16,9 @@ import {
   utcToZonedWallClock,
 } from "@/lib/time";
 import { sendMail } from "@/lib/mail";
+import { refundPackageEntryForBooking } from "@/lib/packages";
 import { settleBookingPaymentsOnCancellation } from "@/lib/payments";
+import { emitEvent } from "@/lib/webhooks";
 import { sendBookingCancellationEmails } from "@/app/api/v1/bookings/emails";
 import { setBookingStatusAction } from "@/app/panel/(dashboard)/actions";
 
@@ -36,8 +38,15 @@ type ActionResult =
   | { ok: true; message?: string }
   | { ok: false; error: string };
 
-/** Ile trwa blokada stolika dla powiadomionego gościa z listy oczekujących. */
-const WAITLIST_HOLD_MIN = 15;
+/**
+ * Ile czasu host daje powiadomionemu gościowi na odpowiedź.
+ *
+ * To NIE jest blokada stolika: `WaitlistEntry.holdUntil` nie jest czytane ani
+ * przez `getTableOccupancy`, ani przez `computeTableAvailability`, więc stolik
+ * przez cały ten czas pozostaje dostępny online. Wpis (i e-mail) mówi wyłącznie
+ * o terminie odpowiedzi — żadnych obietnic „trzymamy stolik".
+ */
+const WAITLIST_REPLY_MIN = 15;
 
 const failure = (error: string): ActionResult => ({ ok: false, error });
 
@@ -134,7 +143,17 @@ async function resolveTurnTimeMin(
     orderBy: { partySizeMin: "asc" },
     select: { durationMin: true },
   });
-  return rule?.durationMin ?? fallbackMin;
+  if (rule) return rule.durationMin;
+
+  // Grupa większa niż najwyższa reguła dostaje JEJ czas, nie wartość domyślną
+  // — inaczej dziesiątka siedziałaby krócej niż czwórka (ta sama zasada co
+  // w `turnTimeForPartySize` w src/lib/table-availability.ts).
+  const highest = await prisma.turnTimeRule.findFirst({
+    where: { locationId, partySizeMax: { lt: partySize } },
+    orderBy: { partySizeMax: "desc" },
+    select: { durationMin: true },
+  });
+  return highest?.durationMin ?? fallbackMin;
 }
 
 type TableContext = {
@@ -193,17 +212,113 @@ async function loadTableService(businessId: string) {
   });
 }
 
-/** Godziny otwarcia danego dnia tygodnia — zewnętrzna granica rezerwacji. */
-function openWindow(
+type OpenWindow = { openMin: number; closeMin: number };
+
+/**
+ * Rozłączne okna otwarcia danego dnia tygodnia.
+ *
+ * Nie min(start)/max(end)! Lokal z lunchem 12:00–16:00 i kolacją 18:00–23:00
+ * byłby wtedy „otwarty" 12:00–23:00 i host tworzyłby rezerwacje w przerwie,
+ * których silnik online (mergeSpans + spanContains) i tak nie pokazuje.
+ */
+function openWindows(
   openingHours: { weekday: number; startMinute: number; endMinute: number }[],
   weekday: number,
-): { openMin: number; closeMin: number } | null {
-  const blocks = openingHours.filter((block) => block.weekday === weekday);
-  if (blocks.length === 0) return null;
-  return {
-    openMin: Math.min(...blocks.map((block) => block.startMinute)),
-    closeMin: Math.max(...blocks.map((block) => block.endMinute)),
-  };
+): OpenWindow[] {
+  const blocks = openingHours
+    .filter((block) => block.weekday === weekday)
+    .map((block) => ({
+      openMin: block.startMinute,
+      closeMin: block.endMinute,
+    }))
+    .filter((block) => block.closeMin > block.openMin)
+    .sort((a, b) => a.openMin - b.openMin);
+
+  const merged: OpenWindow[] = [];
+  for (const block of blocks) {
+    const last = merged[merged.length - 1];
+    if (last && block.openMin <= last.closeMin) {
+      last.closeMin = Math.max(last.closeMin, block.closeMin);
+    } else {
+      merged.push({ ...block });
+    }
+  }
+  return merged;
+}
+
+/** Okno, które w CAŁOŚCI mieści [startMin, endMin] — albo null. */
+function windowContaining(
+  windows: OpenWindow[],
+  startMin: number,
+  endMin: number,
+): OpenWindow | null {
+  return (
+    windows.find(
+      (window) => window.openMin <= startMin && endMin <= window.closeMin,
+    ) ?? null
+  );
+}
+
+/** Czytelny opis godzin otwarcia do komunikatu błędu („12:00–16:00, 18:00–23:00"). */
+function windowsLabel(windows: OpenWindow[]): string {
+  const pad2 = (value: number) => String(value).padStart(2, "0");
+  const label = (minute: number) =>
+    `${pad2(Math.floor(minute / 60))}:${pad2(minute % 60)}`;
+  return windows
+    .map((window) => `${label(window.openMin)}–${label(window.closeMin)}`)
+    .join(", ");
+}
+
+/**
+ * Kolizje, których NIE łapie ograniczenie wykluczające `booking_items_no_overlap`
+ * — leżą w innych tabelach: urlop/blokada stolika lub całego lokalu (`TimeOff`)
+ * oraz aktywna blokada slotu na czas checkoutu (`Hold`). Silnik online honoruje
+ * jedno i drugie (`computeTableAvailability`), więc host nie może ich pomijać.
+ *
+ * Zwraca gotowy komunikat albo null, gdy stolik jest wolny.
+ */
+async function findExternalConflict(options: {
+  locationId: string;
+  resourceId: string;
+  startAt: Date;
+  blockedEndAt: Date;
+  now: Date;
+}): Promise<string | null> {
+  const [timeOff, hold] = await Promise.all([
+    prisma.timeOff.findFirst({
+      where: {
+        OR: [
+          { resourceId: options.resourceId },
+          // Blokada CAŁEGO lokalu to wiersz bez zasobu — dokładnie tak
+          // interpretuje go silnik (`tableId === null` → locationBusy).
+          // Bez `resourceId: null` łapalibyśmy tu urlopy cudzych stolików.
+          { resourceId: null, locationId: options.locationId },
+        ],
+        startAt: { lt: options.blockedEndAt },
+        endAt: { gt: options.startAt },
+      },
+      select: { resourceId: true },
+    }),
+    prisma.hold.findFirst({
+      where: {
+        resourceId: options.resourceId,
+        expiresAt: { gt: options.now },
+        startAt: { lt: options.blockedEndAt },
+        endAt: { gt: options.startAt },
+      },
+      select: { id: true },
+    }),
+  ]);
+
+  if (timeOff) {
+    return timeOff.resourceId
+      ? "Ten stolik jest w tym czasie wyłączony z użytku"
+      : "Lokal ma w tym czasie blokadę — nie da się posadzić gości";
+  }
+  if (hold) {
+    return "Ten stolik jest właśnie rezerwowany przez gościa online. Poczekaj chwilę.";
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +372,13 @@ export async function confirmTableBookingAction(
 }
 
 /**
- * „Posadź" — gość przy stole: PENDING/CONFIRMED → COMPLETED.
+ * „Posadź" — gość przy stole: PENDING/CONFIRMED → CONFIRMED.
+ *
+ * Posadzenie NIE jest zakończeniem wizyty. Wcześniej akcja ustawiała
+ * COMPLETED, przez co gość w chwili posadzenia widział rezerwację jako
+ * zakończoną i dostawał przycisk „Oceń" (konto/booking-status.ts), statystyki
+ * liczyły ją jako odbytą, a host tracił „Nie przyszli"/„Odwołaj". Status
+ * COMPLETED zostaje wyłącznie dla `setBookingStatusAction`.
  *
  * Ten sam wzorzec strażnika co `setBookingStatusAction` w panelu, ale bez
  * warunku „wizyta już się zaczęła": hosta obowiązuje doba lokalu, nie zegar
@@ -302,7 +423,7 @@ export async function seatTableBookingAction(
         businessId: data.businessId,
         status: { in: ["PENDING", "CONFIRMED"] },
       },
-      data: { status: "COMPLETED" },
+      data: { status: "CONFIRMED" },
     });
     if (updated.count === 0) {
       return failure("Status rezerwacji zmienił się w międzyczasie. Odśwież widok.");
@@ -373,17 +494,25 @@ export async function cancelTableBookingAction(
     const { user } = await requireRestaurantManager(data.businessId);
 
     const cancelledAt = new Date();
-    const updated = await prisma.booking.updateMany({
-      where: {
-        id: data.bookingId,
-        businessId: data.businessId,
-        status: { in: ["PENDING", "CONFIRMED"] },
-      },
-      data: {
-        status: "CANCELLED_BY_BUSINESS",
-        cancelledAt,
-        cancellationReason: data.reason || null,
-      },
+    // Zwrot wejścia z karnetu w tej samej transakcji co zmiana statusu —
+    // odwołana wizyta opłacona karnetem oddaje wejście klientowi.
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.booking.updateMany({
+        where: {
+          id: data.bookingId,
+          businessId: data.businessId,
+          status: { in: ["PENDING", "CONFIRMED"] },
+        },
+        data: {
+          status: "CANCELLED_BY_BUSINESS",
+          cancelledAt,
+          cancellationReason: data.reason || null,
+        },
+      });
+      if (result.count > 0) {
+        await refundPackageEntryForBooking(tx, data.bookingId);
+      }
+      return result;
     });
     if (updated.count === 0) {
       return failure("Tej rezerwacji nie można już odwołać. Odśwież widok.");
@@ -410,6 +539,18 @@ export async function cancelTableBookingAction(
 
     // Poczta best-effort i po odpowiedzi — nie może opóźniać akcji hosta.
     after(() => sendBookingCancellationEmails(data.bookingId));
+
+    // Webhooki integratorów: dokumentacja obiecuje booking.cancelled przy
+    // KAŻDYM odwołaniu — także zainicjowanym przez lokal (spójnie
+    // z booking-cancel.ts i publicznym API).
+    after(() =>
+      emitEvent(data.businessId, "booking.cancelled", {
+        bookingId: data.bookingId,
+        status: "CANCELLED_BY_BUSINESS",
+        cancelledAt: cancelledAt.toISOString(),
+        reason: data.reason || null,
+      }),
+    );
   } catch (error) {
     return handleError("cancelTableBookingAction", error);
   }
@@ -462,11 +603,17 @@ export async function createWalkInBookingAction(
 
     const now = new Date();
     const wall = utcToZonedWallClock(now, table.timezone);
-    const window = openWindow(table.openingHours, wall.weekday);
-    if (!window) return failure("Lokal jest dziś zamknięty");
+    const windows = openWindows(table.openingHours, wall.weekday);
+    if (windows.length === 0) return failure("Lokal jest dziś zamknięty");
 
     const nowMin = wall.hour * 60 + wall.minute;
-    if (nowMin >= window.closeMin) return failure("Lokal jest już zamknięty");
+    // Bieżące okno, a gdy trwa przerwa (albo lokal jeszcze nie otworzył) —
+    // najbliższe następne. Rezerwacja nigdy nie wypada w przerwie.
+    const window =
+      windows.find(
+        (block) => nowMin >= block.openMin && nowMin < block.closeMin,
+      ) ?? windows.find((block) => block.openMin > nowMin);
+    if (!window) return failure("Lokal jest już zamknięty");
 
     const startMin = Math.max(nowMin, window.openMin);
     const turnTimeMin = await resolveTurnTimeMin(
@@ -482,6 +629,18 @@ export async function createWalkInBookingAction(
     const day = { year: wall.year, month: wall.month, day: wall.day };
     const startAt = localDayMinutesToUtc(day, startMin, table.timezone);
     const endAt = localDayMinutesToUtc(day, endMin, table.timezone);
+    const blockedEndAt = addMinutes(endAt, table.tableBufferMin);
+
+    // Ograniczenie wykluczające widzi tylko `booking_items` — urlop stolika
+    // i blokadę lokalu trzeba sprawdzić osobno.
+    const conflict = await findExternalConflict({
+      locationId: table.locationId,
+      resourceId: table.resourceId,
+      startAt,
+      blockedEndAt,
+      now,
+    });
+    if (conflict) return failure(conflict);
 
     await prisma.booking.create({
       select: { id: true },
@@ -505,7 +664,7 @@ export async function createWalkInBookingAction(
             endAt,
             blockedStartAt: startAt,
             // Bufor na sprzątanie po wyjściu gości.
-            blockedEndAt: addMinutes(endAt, table.tableBufferMin),
+            blockedEndAt,
             durationMin: endMin - startMin,
             bufferAfterMin: table.tableBufferMin,
             priceCents: 0,
@@ -559,9 +718,13 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * „Powiadom" — wpis dostaje status NOTIFIED i 15-minutową blokadę stolika.
+ * „Powiadom" — wpis dostaje status NOTIFIED i termin odpowiedzi (`holdUntil`).
  * E-mail (gdy znamy adres) leci przez `sendMail`, więc próba trafia do tabeli
  * `notifications` także bez klucza Resend (status SKIPPED).
+ *
+ * Uwaga: to powiadomienie, nie rezerwacja. Stolik nie jest nigdzie blokowany
+ * (patrz `WAITLIST_REPLY_MIN`), więc ani mail, ani toast nie mogą tego
+ * obiecywać — kto pierwszy potwierdzi, ten siada.
  */
 export async function notifyWaitlistEntryAction(
   input: unknown,
@@ -590,7 +753,7 @@ export async function notifyWaitlistEntryAction(
     if (!entry) return failure("Nie znaleziono wpisu na liście");
 
     const notifiedAt = new Date();
-    const holdUntil = addMinutes(notifiedAt, WAITLIST_HOLD_MIN);
+    const holdUntil = addMinutes(notifiedAt, WAITLIST_REPLY_MIN);
     const updated = await prisma.waitlistEntry.updateMany({
       where: {
         id: entry.id,
@@ -622,8 +785,10 @@ export async function notifyWaitlistEntryAction(
       const until = formatInZone(holdUntil, timezone);
       const phone = entry.location.phone;
       const lines = [
-        `${guest ? `${guest}, m` : "M"}amy dla Ciebie stolik w ${entry.business.name} na godzinę ${requested} (${entry.partySize} os.).`,
-        `Trzymamy go do ${until}${phone ? ` — potwierdź telefonicznie: ${phone}` : ""}.`,
+        `${guest ? `${guest}, z` : "Z"}wolnił się stolik w ${entry.business.name} na godzinę ${requested} (${entry.partySize} os.).`,
+        // Bez obietnicy blokady: stolik jest nadal dostępny online, więc
+        // liczy się kolejność potwierdzeń, a nie sam fakt powiadomienia.
+        `Odezwij się do ${until}${phone ? `, żeby go potwierdzić: ${phone}` : ""} — stolik nie jest zarezerwowany, dostaje go pierwsza osoba, która potwierdzi.`,
       ];
       after(() =>
         sendMail({
@@ -642,8 +807,8 @@ export async function notifyWaitlistEntryAction(
     return {
       ok: true,
       message: email
-        ? `Powiadomiono gościa — stolik zablokowany na ${WAITLIST_HOLD_MIN} min`
-        : `Stolik zablokowany na ${WAITLIST_HOLD_MIN} min (brak e-maila — zadzwoń)`,
+        ? `Powiadomiono gościa — czeka na odpowiedź do ${WAITLIST_REPLY_MIN} min (stolik nie jest blokowany)`
+        : `Oznaczono jako powiadomiony (brak e-maila — zadzwoń; stolik nie jest blokowany)`,
     };
   } catch (error) {
     return handleError("notifyWaitlistEntryAction", error);
@@ -708,8 +873,8 @@ export async function convertWaitlistEntryAction(
       month: requested.month,
       day: requested.day,
     };
-    const window = openWindow(table.openingHours, requested.weekday);
-    if (!window) return failure("Lokal jest tego dnia zamknięty");
+    const windows = openWindows(table.openingHours, requested.weekday);
+    if (windows.length === 0) return failure("Lokal jest tego dnia zamknięty");
 
     const turnTimeMin = await resolveTurnTimeMin(
       table.locationId,
@@ -718,16 +883,36 @@ export async function convertWaitlistEntryAction(
     );
     const startMin = data.startMinute;
     const endMin = startMin + turnTimeMin;
-    if (startMin < window.openMin || endMin > window.closeMin) {
+    // Cała rezerwacja musi zmieścić się w JEDNYM oknie otwarcia — przerwa
+    // między lunchem a kolacją nie jest czasem, w którym lokal obsługuje gości.
+    if (!windowContaining(windows, startMin, endMin)) {
       return failure(
-        `Rezerwacja (${turnTimeMin} min) musi zmieścić się w godzinach otwarcia`,
+        `Rezerwacja (${turnTimeMin} min) musi zmieścić się w godzinach otwarcia: ${windowsLabel(windows)}`,
       );
     }
 
+    const now = new Date();
     const startAt = localDayMinutesToUtc(day, startMin, table.timezone);
     const endAt = localDayMinutesToUtc(day, endMin, table.timezone);
+    const blockedEndAt = addMinutes(endAt, table.tableBufferMin);
 
-    await prisma.$transaction(async (tx) => {
+    // Host nawigujący na wcześniejszy dzień wciąż widzi wpisy WAITING z tamtej
+    // doby — bez tego strażnika powstawała CONFIRMED w przeszłości, blokująca
+    // historyczny slot i psująca statystyki.
+    if (startAt.getTime() <= now.getTime()) {
+      return failure("Rezerwację można utworzyć tylko na przyszły termin");
+    }
+
+    const conflict = await findExternalConflict({
+      locationId: table.locationId,
+      resourceId: table.resourceId,
+      startAt,
+      blockedEndAt,
+      now,
+    });
+    if (conflict) return failure(conflict);
+
+    const bookingId = await prisma.$transaction(async (tx) => {
       // Zajmujemy wpis strażnikiem statusu — dwóch hostów nie zamieni tego
       // samego zgłoszenia na dwie rezerwacje.
       const claimed = await tx.waitlistEntry.updateMany({
@@ -767,7 +952,7 @@ export async function convertWaitlistEntryAction(
               startAt,
               endAt,
               blockedStartAt: startAt,
-              blockedEndAt: addMinutes(endAt, table.tableBufferMin),
+              blockedEndAt,
               durationMin: turnTimeMin,
               bufferAfterMin: table.tableBufferMin,
               priceCents: 0,
@@ -781,19 +966,25 @@ export async function convertWaitlistEntryAction(
         data: { bookingId: booking.id },
       });
 
-      await logAudit({
-        businessId: data.businessId,
-        actorUserId: user.id,
-        action: "WAITLIST_CONVERTED",
-        entityType: "WaitlistEntry",
-        entityId: entry.id,
-        metadata: {
-          bookingId: booking.id,
-          resourceId: table.resourceId,
-          startLocal: formatInZone(startAt, table.timezone),
-          partySize: entry.partySize,
-        },
-      });
+      return booking.id;
+    });
+
+    // Audyt POZA transakcją: `logAudit` idzie globalnym klientem, więc w środku
+    // `$transaction` zabierał drugie połączenie z puli (na Neonie potrafi to
+    // zagłodzić transakcję do timeoutu), a przy nieudanym commicie zostawiał
+    // wpis WAITLIST_CONVERTED bez rezerwacji.
+    await logAudit({
+      businessId: data.businessId,
+      actorUserId: user.id,
+      action: "WAITLIST_CONVERTED",
+      entityType: "WaitlistEntry",
+      entityId: entry.id,
+      metadata: {
+        bookingId,
+        resourceId: table.resourceId,
+        startLocal: formatInZone(startAt, table.timezone),
+        partySize: entry.partySize,
+      },
     });
 
     refresh();

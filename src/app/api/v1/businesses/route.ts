@@ -48,7 +48,15 @@ export async function GET(request: Request) {
         },
       },
       services: {
-        where: { isActive: true, onlineBookable: true },
+        // Cena „od" tylko z płatnych pozycji cennika: usługa techniczna
+        // `TABLE_RESERVATION` (0 zł) zaniżyłaby każdą restaurację do „od 0 zł",
+        // a wycena ON_REQUEST nie ma kwoty. Ten sam filtr co w src/app/page.tsx.
+        where: {
+          isActive: true,
+          onlineBookable: true,
+          kind: "STANDARD",
+          priceType: { in: ["FIXED", "FROM"] },
+        },
         orderBy: { priceCents: "asc" },
         take: 1,
         select: { priceCents: true, currency: true, priceType: true },

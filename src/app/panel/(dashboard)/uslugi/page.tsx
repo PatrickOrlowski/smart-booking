@@ -20,7 +20,10 @@ export default async function ServicesPage() {
       select: { id: true, name: true },
     }),
     prisma.service.findMany({
-      where: { businessId: business.id },
+      // Usługa techniczna `TABLE_RESERVATION` nie jest pozycją cennika:
+      // jej wyłączenie albo usunięcie rozbroiłoby CAŁĄ rezerwację stolików
+      // (getRestaurantLocation wymaga jej z isActive = true).
+      where: { businessId: business.id, kind: "STANDARD" },
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
       include: {
         resources: {

@@ -171,6 +171,14 @@ export function FloorPlanGrid({
     table: PlanTable,
   ) => {
     if (!canEdit) return;
+    // Autorepeat systemowy generuje ~30 zdarzeń na sekundę, a każde z nich
+    // to server action + 4 × revalidatePath + router.refresh(), kolejkowane
+    // szeregowo — po puszczeniu klawisza UI zamierał na kilkanaście sekund.
+    // Jedno wciśnięcie = jedna komórka.
+    if (event.repeat) {
+      event.preventDefault();
+      return;
+    }
     const steps: Record<string, [number, number]> = {
       ArrowLeft: [-1, 0],
       ArrowRight: [1, 0],

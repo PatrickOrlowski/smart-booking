@@ -5,6 +5,9 @@ import { env } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
 import { consumeHold, resolveSlot, SLOT_TAKEN_MESSAGE } from "@/lib/hold";
 import { createBookingPayment } from "@/lib/payments";
+import { DiscountRejectedError, redeemDiscountCode } from "@/lib/discounts";
+import { logAudit } from "@/lib/audit";
+import { emitEvent } from "@/lib/webhooks";
 import {
   findCustomerByContact,
   findOrCreateCustomerForBooking,
@@ -46,6 +49,13 @@ const bookingSchema = z.object({
     })
     .optional(),
   customerNote: z.string().max(500).optional(),
+  /** Kod rabatowy — walidowany i utrwalany w tej samej transakcji co rezerwacja. */
+  discountCode: z.string().trim().min(1).max(64).optional(),
+  /**
+   * Widget osadzany w iframe (/widget/[slug]) deklaruje WEB_WIDGET — innych
+   * źródeł klient nie może sobie wybrać (wynikają z kanału, nie z body).
+   */
+  source: z.literal("WEB_WIDGET").optional(),
 });
 
 /**
@@ -265,7 +275,7 @@ export async function POST(request: Request) {
             }
           : { guestName: null, guestEmail: null, guestPhone: null };
 
-      return tx.booking.create({
+      const created = await tx.booking.create({
         data: {
           businessId: context.business.id,
           locationId: context.location.id,
@@ -273,7 +283,7 @@ export async function POST(request: Request) {
           customerId,
           ...guestData,
           status: "CONFIRMED",
-          source: "WEB_MARKETPLACE",
+          source: input.source ?? "WEB_MARKETPLACE",
           startAt: slot.startAt,
           endAt: slot.endAt,
           totalPriceCents: slot.priceCents,
@@ -296,6 +306,39 @@ export async function POST(request: Request) {
         },
         select: { id: true, status: true, createdAt: true },
       });
+
+      // Kod rabatowy: walidacja, licznik użyć i wiersz DiscountRedemption
+      // w TEJ SAMEJ transakcji co rezerwacja — odrzucony kod cofa całość,
+      // a zapisana rezerwacja zawsze ma pokrycie w wierszu użycia.
+      // Pozycja BookingItem zachowuje cenę katalogową; rabat jest własnością
+      // rezerwacji (Booking.discountCents), więc statystyki usług się nie psują.
+      let discountCents = 0;
+      if (input.discountCode) {
+        const redeemed = await redeemDiscountCode(tx, {
+          businessId: context.business.id,
+          enteredCode: input.discountCode,
+          subtotalCents: slot.priceCents,
+          bookingId: created.id,
+          customerId,
+          currency: context.service.currency,
+          now,
+        });
+        discountCents = redeemed.discountCents;
+        await tx.booking.update({
+          where: { id: created.id },
+          data: {
+            discountCents,
+            discountCodeId: redeemed.discountCodeId,
+            totalPriceCents: slot.priceCents - discountCents,
+          },
+        });
+      }
+
+      return {
+        ...created,
+        discountCents,
+        totalPriceCents: slot.priceCents - discountCents,
+      };
     });
 
     // Zadatek: gdy usługa go wymaga, do rezerwacji powstaje Payment
@@ -314,13 +357,19 @@ export async function POST(request: Request) {
         where: { id: context.service.id },
         select: { depositRequired: true, depositCents: true },
       });
-      if (deposit?.depositRequired && deposit.depositCents) {
+      // Rabat może zejść poniżej kwoty zadatku — zadatek nigdy nie może być
+      // wyższy niż to, co klient faktycznie płaci za wizytę.
+      const depositCents = Math.min(
+        deposit?.depositCents ?? 0,
+        booking.totalPriceCents,
+      );
+      if (deposit?.depositRequired && depositCents > 0) {
         const created = await createBookingPayment(
           booking.id,
           context.business.id,
           {
             kind: "DEPOSIT",
-            amountCents: deposit.depositCents,
+            amountCents: depositCents,
             currency: context.service.currency,
             description: `Zadatek — ${context.service.name}`,
             // Powrót z bramki na ekran sukcesu flow rezerwacji.
@@ -339,10 +388,47 @@ export async function POST(request: Request) {
       console.error("Nie udało się utworzyć płatności zadatku:", error);
     }
 
+    // Ślad użycia kodu w dzienniku firmy — audyt jest obserwatorem, więc
+    // leci poza transakcją i nigdy nie wywraca już zapisanej rezerwacji.
+    if (booking.discountCents > 0) {
+      after(() =>
+        logAudit({
+          businessId: context.business.id,
+          actorUserId: sessionUserId,
+          action: "DISCOUNT_REDEEMED",
+          entityType: "Booking",
+          entityId: booking.id,
+          metadata: {
+            code: input.discountCode ?? null,
+            discountCents: booking.discountCents,
+            totalPriceCents: booking.totalPriceCents,
+          },
+        }),
+      );
+    }
+
     // E-maile poza transakcją, best-effort i PO odpowiedzi: wolny albo
     // zawieszony Resend nie może opóźnić 201 (klient dostawał 504, ponawiał
     // i trafiał na 409 od własnej, już zapisanej rezerwacji).
     after(() => sendBookingConfirmationEmails(booking.id));
+
+    // Webhooki integratorów — również po odpowiedzi i best-effort (emitEvent
+    // sam nie rzuca); cudzy serwer nie może opóźnić 201.
+    after(() =>
+      emitEvent(context.business.id, "booking.created", {
+        bookingId: booking.id,
+        status: booking.status,
+        source: input.source ?? "WEB_MARKETPLACE",
+        startAt: slot.startAt.toISOString(),
+        endAt: slot.endAt.toISOString(),
+        serviceId: context.service.id,
+        serviceName: context.service.name,
+        resourceId: slot.resourceId,
+        priceCents: booking.totalPriceCents,
+        discountCents: booking.discountCents,
+        currency: context.service.currency,
+      }),
+    );
 
     const cancellationDeadline = new Date(
       slot.startAt.getTime() -
@@ -357,7 +443,11 @@ export async function POST(request: Request) {
           startAt: slot.startAt.toISOString(),
           endAt: slot.endAt.toISOString(),
           durationMin: slot.durationMin,
-          priceCents: slot.priceCents,
+          /** Cena PO rabacie — tyle klient płaci za wizytę. */
+          priceCents: booking.totalPriceCents,
+          /** Cena katalogowa przed rabatem. */
+          subtotalCents: slot.priceCents,
+          discountCents: booking.discountCents,
           currency: context.service.currency,
           serviceName: context.service.name,
           resourceId: slot.resourceId,
@@ -374,6 +464,18 @@ export async function POST(request: Request) {
       { status: 201 },
     );
   } catch (error) {
+    // Zły kod rabatowy to błąd danych wejściowych, nie awaria — 422
+    // z czytelnym powodem, a rezerwacja NIE powstaje (rollback transakcji).
+    if (error instanceof DiscountRejectedError) {
+      return NextResponse.json(
+        {
+          error: "DISCOUNT_INVALID",
+          reason: error.reason,
+          message: error.userMessage,
+        },
+        { status: 422 },
+      );
+    }
     if (error instanceof HoldRejected) {
       return NextResponse.json(
         { error: error.code, message: error.userMessage },

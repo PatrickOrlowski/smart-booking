@@ -180,7 +180,14 @@ export type BookingEmailData = {
   /** Pełny adres lokalu, np. "Nowa 5, 00-001 Warszawa". */
   address: string;
   serviceName: string;
+  /**
+   * Etykieta pierwszego wiersza tabelki. Domyślnie „Usługa"; rezerwacja
+   * stolika mówi „Stolik", bo gość nie wybierał żadnej usługi.
+   */
+  serviceLabel?: string;
   staffName?: string | null;
+  /** Etykieta wiersza z zasobem: „Pracownik" w salonie, „Stolik" w restauracji. */
+  staffLabel?: string;
   startAt: Date;
   endAt: Date;
   /** Strefa IANA lokalu — termin formatujemy w niej, nie w UTC. */
@@ -205,8 +212,10 @@ type DetailRow = { label: string; value: string };
 
 function bookingRows(data: BookingEmailData): DetailRow[] {
   const rows: DetailRow[] = [
-    { label: "Usługa", value: data.serviceName },
-    ...(data.staffName ? [{ label: "Pracownik", value: data.staffName }] : []),
+    { label: data.serviceLabel ?? "Usługa", value: data.serviceName },
+    ...(data.staffName
+      ? [{ label: data.staffLabel ?? "Pracownik", value: data.staffName }]
+      : []),
     {
       label: "Termin",
       value: formatRangeInZone(data.startAt, data.endAt, data.timezone),

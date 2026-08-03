@@ -111,6 +111,25 @@ export async function createBusinessAction(
           type: data.type,
           status: "ACTIVE",
           ownerId: userId,
+          // Restauracja nie ma cennika usług — rezerwację stolika niesie
+          // syntetyczna usługa `TABLE_RESERVATION`. Bez niej publiczny profil,
+          // silnik dostępności i akcje hosta nie mają czego zapisać.
+          ...(data.type === "RESTAURANT"
+            ? {
+                services: {
+                  create: {
+                    name: "Rezerwacja stolika",
+                    kind: "TABLE_RESERVATION" as const,
+                    // Właściwy czas przy stole liczy TurnTimeRule/
+                    // Location.defaultTurnTimeMin — tu tylko wartość domyślna.
+                    durationMin: 90,
+                    priceCents: 0,
+                    priceType: "FREE" as const,
+                    onlineBookable: true,
+                  },
+                },
+              }
+            : {}),
           locations: {
             create: {
               name: data.name,

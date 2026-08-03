@@ -28,6 +28,8 @@ type BookingForEmail = {
   endAt: Date;
   totalPriceCents: number;
   currency: string;
+  /** Rezerwacja stolika — liczba osób zamiast wybranej usługi. */
+  partySize: number | null;
   guestName: string | null;
   guestEmail: string | null;
   user: { name: string | null; email: string | null } | null;
@@ -57,6 +59,7 @@ async function loadBooking(bookingId: string): Promise<BookingForEmail | null> {
       endAt: true,
       totalPriceCents: true,
       currency: true,
+      partySize: true,
       guestName: true,
       guestEmail: true,
       user: { select: { name: true, email: true } },
@@ -97,10 +100,23 @@ type Prepared = {
   serviceName: string;
 };
 
+/** „1 osoby", „2 osób" — dopełniacz po „dla". */
+const partySizeGenitive = (partySize: number): string =>
+  partySize === 1 ? "1 osoby" : `${partySize} osób`;
+
 function prepare(booking: BookingForEmail): Prepared {
   const address = `${booking.location.addressLine1}, ${booking.location.postalCode} ${booking.location.city}`;
-  const serviceName =
-    booking.items.map((item) => item.service.name).join(" + ") || "Wizyta";
+
+  // Rezerwacja stolika ma pozycję na KAŻDYM zajmowanym stoliku, wszystkie
+  // z tą samą usługą techniczną — bez deduplikacji zestawienie dwóch stolików
+  // dawało „Usługa: Rezerwacja stolika + Rezerwacja stolika".
+  const isTableBooking = booking.partySize !== null;
+  const serviceNames = [
+    ...new Set(booking.items.map((item) => item.service.name)),
+  ];
+  const serviceName = isTableBooking
+    ? `Stolik dla ${partySizeGenitive(booking.partySize!)}`
+    : serviceNames.join(" + ") || "Wizyta";
   const staffNames = [
     ...new Set(booking.items.map((item) => item.resource.name)),
   ];
@@ -121,6 +137,7 @@ function prepare(booking: BookingForEmail): Prepared {
       businessName: booking.business.name,
       address,
       serviceName,
+      ...(isTableBooking ? { serviceLabel: "Stolik", staffLabel: "Stolik" } : {}),
       staffName: staffNames.join(", ") || null,
       startAt: booking.startAt,
       endAt: booking.endAt,

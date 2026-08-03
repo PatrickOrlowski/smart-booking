@@ -148,13 +148,21 @@ export default async function ActivityPage({
         .filter((id): id is string => id !== null),
     ),
   ];
+  // Aktor platformy (moderacja, decyzje o firmie) występuje wobec właściciela
+  // jako „Planner" — imię i e-mail konkretnego administratora to dane
+  // wewnętrzne platformy, nie informacja dla moderowanej firmy.
   const actors = new Map(
     (
       await prisma.user.findMany({
         where: { id: { in: actorIds } },
-        select: { id: true, name: true, email: true },
+        select: { id: true, name: true, email: true, role: true },
       })
-    ).map((user) => [user.id, user.name ?? user.email ?? "Użytkownik"]),
+    ).map((user) => [
+      user.id,
+      user.role === "PLATFORM_ADMIN"
+        ? "Planner"
+        : (user.name ?? user.email ?? "Użytkownik"),
+    ]),
   );
 
   const dateFormatter = new Intl.DateTimeFormat("pl-PL", {

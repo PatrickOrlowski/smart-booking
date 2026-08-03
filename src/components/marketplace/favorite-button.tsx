@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { Heart } from "lucide-react";
 import { toggleFavorite } from "@/app/b/[slug]/favorite-action";
 import { cn } from "@/lib/utils";
+import { useTranslations } from "@/i18n/client";
 
 /**
  * Serce „dodaj do ulubionych" na profilu firmy. Stan przełącza się
@@ -19,6 +20,7 @@ export function FavoriteButton({
   initialIsFavorite: boolean;
   className?: string;
 }) {
+  const { t } = useTranslations();
   const [isFavorite, setIsFavorite] = useState(initialIsFavorite);
   const [, startTransition] = useTransition();
 
@@ -40,8 +42,8 @@ export function FavoriteButton({
       type="button"
       onClick={handleClick}
       aria-pressed={isFavorite}
-      aria-label={isFavorite ? "Usuń z ulubionych" : "Dodaj do ulubionych"}
-      title={isFavorite ? "Usuń z ulubionych" : "Dodaj do ulubionych"}
+      aria-label={isFavorite ? t("favorite.remove") : t("favorite.add")}
+      title={isFavorite ? t("favorite.remove") : t("favorite.add")}
       className={cn(
         "flex size-11 flex-none items-center justify-center rounded-full border-[1.5px] border-border-strong bg-card transition-colors hover:bg-muted lg:size-10",
         className,

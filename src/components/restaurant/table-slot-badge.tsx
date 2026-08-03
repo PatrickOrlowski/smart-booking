@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { DEFAULT_LOCALE, createTranslator, type Locale } from "@/i18n";
 
 /**
  * Wskaźnik najbliższego wolnego stolika na karcie listingu.
@@ -10,15 +11,16 @@ export function TableSlotBadge({
   label,
   variant = "text",
   className,
+  locale = DEFAULT_LOCALE,
 }: {
   label: string | null | undefined;
   variant?: "pill" | "text";
   className?: string;
+  locale?: Locale;
 }) {
+  const t = createTranslator(locale);
   const text =
-    label === undefined
-      ? "Sprawdzamy wolne stoliki…"
-      : (label ?? "Brak wolnych stolików w tym tygodniu");
+    label === undefined ? t("badge.checking") : (label ?? t("badge.noneWeek"));
 
   if (variant === "pill") {
     return (

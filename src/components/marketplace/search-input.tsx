@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { useTranslations } from "@/i18n/client";
 
 /**
  * Pole wyszukiwarki — filtruje po nazwie firmy i mieście przez parametr
@@ -10,6 +11,7 @@ import { cn } from "@/lib/utils";
  * wraca do poprzedniego zapytania.
  */
 export function SearchInput({ className }: { className?: string }) {
+  const { t } = useTranslations();
   const router = useRouter();
   const searchParams = useSearchParams();
   const initial = searchParams.get("q") ?? "";
@@ -47,9 +49,9 @@ export function SearchInput({ className }: { className?: string }) {
         type="search"
         value={value}
         onChange={(event) => apply(event.target.value)}
-        placeholder="Barber, fryzjer, miasto…"
+        placeholder={t("search.placeholder")}
         className="w-full bg-transparent text-sm outline-none placeholder:text-[#8f8b81]"
-        aria-label="Szukaj firmy lub miasta"
+        aria-label={t("search.aria")}
       />
     </label>
   );

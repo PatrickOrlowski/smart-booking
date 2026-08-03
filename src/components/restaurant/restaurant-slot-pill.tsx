@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useLocale } from "@/i18n/client";
 import { localIsoDate, tableSlotLabel } from "./format";
 import { TableSlotBadge } from "./table-slot-badge";
-import type { AvailabilityResponse } from "./types";
 
 /**
  * „Stolik dziś od 18:00" doliczany w przeglądarce.
@@ -12,6 +12,11 @@ import type { AvailabilityResponse } from "./types";
  * nie może pochodzić z czasu builda — pastylka odpytuje API po zamontowaniu
  * i do tego czasu pokazuje neutralny placeholder. Dzień liczymy w strefie
  * LOKALU, nie przeglądarki.
+ *
+ * Żądanie idzie w trybie `nearest=1`: odpowiedź to JEDNA data zamiast kompletu
+ * slotów z trzech dni (czytamy i tak tylko pierwszy), a serwer oznacza ją jako
+ * cache'owalną na 60 s — listing z 20 restauracjami nie przesyła wtedy
+ * dwudziestu pełnych siatek godzin.
  */
 
 const LOOKAHEAD_DAYS = 3;
@@ -29,6 +34,7 @@ export function RestaurantSlotPill({
   variant?: "pill" | "text";
   className?: string;
 }) {
+  const locale = useLocale();
   const [label, setLabel] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
@@ -38,19 +44,17 @@ export function RestaurantSlotPill({
       date: localIsoDate(now, timezone),
       partySize: String(partySize),
       days: String(LOOKAHEAD_DAYS),
+      nearest: "1",
     });
     fetch(`/api/v1/restaurants/${slug}/availability?${params}`, {
       signal: controller.signal,
     })
       .then(async (response) => {
         if (!response.ok) throw new Error("availability");
-        const data = (await response.json()) as AvailabilityResponse;
-        const first = (data.days ?? [{ slots: data.slots }]).flatMap(
-          (day) => day.slots,
-        )[0];
+        const data = (await response.json()) as { nearest: string | null };
         setLabel(
-          first
-            ? tableSlotLabel(new Date(first.startAt), timezone, new Date())
+          data.nearest
+            ? tableSlotLabel(new Date(data.nearest), timezone, locale, new Date())
             : null,
         );
       })
@@ -59,9 +63,14 @@ export function RestaurantSlotPill({
         setLabel(null);
       });
     return () => controller.abort();
-  }, [slug, timezone, partySize]);
+  }, [slug, timezone, partySize, locale]);
 
   return (
-    <TableSlotBadge label={label} variant={variant} className={className} />
+    <TableSlotBadge
+      label={label}
+      variant={variant}
+      className={className}
+      locale={locale}
+    />
   );
 }

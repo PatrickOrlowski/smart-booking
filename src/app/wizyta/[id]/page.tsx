@@ -9,6 +9,9 @@ import {
   formatDateTimeLabel,
   formatPrice,
 } from "@/components/marketplace/format";
+import { LocaleProvider } from "@/i18n/client";
+import { getTranslations } from "@/i18n/server";
+import type { MessageKey } from "@/i18n";
 import { cancelGuestBookingAction } from "./actions";
 
 /**
@@ -21,17 +24,20 @@ import { cancelGuestBookingAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
-export const metadata: Metadata = {
-  title: "Twoja wizyta — Planner",
-  robots: { index: false, follow: false },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const { t } = await getTranslations();
+  return {
+    title: t("wz.metaTitle"),
+    robots: { index: false, follow: false },
+  };
+}
 
-const ERROR_MESSAGES: Record<string, string> = {
-  INVALID_STATE: "Tej wizyty nie można już odwołać.",
-  CUTOFF_PASSED:
-    "Termin bezpłatnego odwołania już minął — skontaktuj się z lokalem telefonicznie.",
-  FORBIDDEN: "Brak uprawnień do tej rezerwacji.",
-  NOT_FOUND: "Nie znaleziono rezerwacji.",
+/** Kod błędu z redirectu server action → klucz komunikatu w słowniku. */
+const ERROR_KEYS: Record<string, MessageKey> = {
+  INVALID_STATE: "err.INVALID_STATE",
+  CUTOFF_PASSED: "err.CUTOFF_PASSED",
+  FORBIDDEN: "err.FORBIDDEN",
+  NOT_FOUND: "err.NOT_FOUND",
 };
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -44,7 +50,8 @@ export default async function GuestBookingPage({
   searchParams: Promise<{ t?: string; blad?: string }>;
 }) {
   const { id } = await params;
-  const { t, blad } = await searchParams;
+  const { t: token, blad } = await searchParams;
+  const { locale, t } = await getTranslations();
   // „Teraz" ustalone raz, przed renderem (strona jest force-dynamic).
   const now = new Date();
 
@@ -87,8 +94,8 @@ export default async function GuestBookingPage({
     !booking ||
     booking.customerUserId !== null ||
     !booking.guestEmail ||
-    !t ||
-    !verifyBookingManageToken(booking.id, booking.guestEmail, t)
+    !token ||
+    !verifyBookingManageToken(booking.id, booking.guestEmail, token)
   ) {
     notFound();
   }
@@ -104,44 +111,47 @@ export default async function GuestBookingPage({
 
   const rows: { label: string; value: string }[] = [
     {
-      label: "Usługa",
+      label: t("wz.service"),
       value: booking.items.map((item) => item.service.name).join(" + "),
     },
     {
-      label: "Pracownik",
+      label: t("wz.staff"),
       value: [
         ...new Set(booking.items.map((item) => item.resource.name)),
       ].join(", "),
     },
     {
-      label: "Termin",
-      value: formatDateTimeLabel(booking.startAt, location.timezone),
+      label: t("wz.term"),
+      value: formatDateTimeLabel(booking.startAt, location.timezone, locale),
     },
     {
-      label: "Miejsce",
+      label: t("wz.place"),
       value: `${booking.business.name}, ${location.addressLine1}, ${location.postalCode} ${location.city}`,
     },
     {
-      label: "Cena",
-      value: formatPrice(booking.totalPriceCents, booking.currency),
+      label: t("wz.price"),
+      value: formatPrice(booking.totalPriceCents, booking.currency, locale),
     },
   ];
 
   return (
-    <>
-      <SiteHeader showAuth={false} />
+    // LocaleProvider jak na pozostałych stronach publicznych — bez niego
+    // kliencki LocaleSwitcher w nagłówku czyta domyślne "pl" i przy cookie
+    // EN podświetla zły język, a klik w „PL" jest no-opem.
+    <LocaleProvider locale={locale}>
+      <SiteHeader showAuth={false} locale={locale} />
       <main className="mx-auto w-full max-w-md px-5 pt-6 pb-16 lg:pt-10">
-        <div className="meta-label">Twoja wizyta</div>
+        <div className="meta-label">{t("wz.label")}</div>
         <h1 className="mt-1.5 mb-4 font-display text-[30px] leading-none font-extrabold tracking-tight">
-          {isCancelled ? "Wizyta odwołana." : "Rezerwacja potwierdzona."}
+          {isCancelled ? t("wz.cancelledTitle") : t("wz.confirmedTitle")}
         </h1>
 
-        {blad && ERROR_MESSAGES[blad] ? (
+        {blad && ERROR_KEYS[blad] ? (
           <p
             role="alert"
             className="mb-4 rounded-xl border border-destructive/30 bg-destructive/10 px-3.5 py-2.5 text-[12.5px] font-medium text-destructive"
           >
-            {ERROR_MESSAGES[blad]}
+            {t(ERROR_KEYS[blad])}
           </p>
         ) : null}
 
@@ -160,24 +170,24 @@ export default async function GuestBookingPage({
           {canCancel ? (
             <form action={cancelGuestBookingAction} className="mt-5">
               <input type="hidden" name="bookingId" value={booking.id} />
-              <input type="hidden" name="token" value={t} />
+              <input type="hidden" name="token" value={token} />
               <button
                 type="submit"
                 className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-full border border-destructive/30 bg-card px-4 text-[13px] font-semibold text-destructive transition-colors hover:bg-destructive/10"
               >
-                Odwołaj wizytę
+                {t("wz.cancelCta")}
               </button>
               <p className="mt-2 font-mono text-[11px] text-muted-foreground">
-                bezpłatnie do {cutoffHours} h przed wizytą
+                {t("wz.freeUntil", { hours: cutoffHours })}
               </p>
             </form>
           ) : (
             <p className="mt-5 text-[12.5px] leading-relaxed text-muted-foreground">
               {isCancelled
-                ? "Ta wizyta została już odwołana."
-                : `Wizyty nie można odwołać online (termin minął albo zostało mniej niż ${cutoffHours} h).`}
+                ? t("wz.alreadyCancelled")
+                : t("wz.cannotCancel", { hours: cutoffHours })}
               {location.phone
-                ? ` W razie pytań zadzwoń: ${location.phone}.`
+                ? t("wz.callQuestions", { phone: location.phone })
                 : ""}
             </p>
           )}
@@ -187,9 +197,9 @@ export default async function GuestBookingPage({
           href={`/b/${booking.business.slug}`}
           className="mt-5 inline-flex min-h-11 items-center rounded-full bg-primary px-5 text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-primary/80"
         >
-          {isCancelled ? "Zarezerwuj nowy termin" : "Zobacz profil firmy"}
+          {isCancelled ? t("wz.bookNew") : t("wz.seeProfile")}
         </Link>
       </main>
-    </>
+    </LocaleProvider>
   );
 }

@@ -1,6 +1,8 @@
 import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { emitEvent } from "@/lib/webhooks";
+import { refundPackageEntryForBooking } from "@/lib/packages";
 import { settleBookingPaymentsOnCancellation } from "@/lib/payments";
 import { sendBookingCancellationEmails } from "@/app/api/v1/bookings/emails";
 
@@ -102,19 +104,29 @@ export async function cancelBooking(input: {
   const cancelledAt = new Date();
   // Strażnik statusu w samym UPDATE: równoległe odwołanie przez firmę
   // (CANCELLED_BY_BUSINESS) nie może zostać nadpisane read-modify-write.
-  const updated = await prisma.booking.updateMany({
-    where: {
-      id: booking.id,
-      status: { in: ["PENDING", "CONFIRMED"] },
-      ...(input.actor.kind === "user"
-        ? { customerUserId: input.actor.userId }
-        : { customerUserId: null }),
-    },
-    data: {
-      status: "CANCELLED_BY_CUSTOMER",
-      cancelledAt,
-      ...(input.reason !== undefined ? { cancellationReason: input.reason } : {}),
-    },
+  // Zwrot wejścia z karnetu idzie w TEJ SAMEJ transakcji — anulowana wizyta
+  // opłacona karnetem nie może „zjeść" wejścia (odwrotność consumePackageEntry).
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.booking.updateMany({
+      where: {
+        id: booking.id,
+        status: { in: ["PENDING", "CONFIRMED"] },
+        ...(input.actor.kind === "user"
+          ? { customerUserId: input.actor.userId }
+          : { customerUserId: null }),
+      },
+      data: {
+        status: "CANCELLED_BY_CUSTOMER",
+        cancelledAt,
+        ...(input.reason !== undefined
+          ? { cancellationReason: input.reason }
+          : {}),
+      },
+    });
+    if (result.count > 0) {
+      await refundPackageEntryForBooking(tx, booking.id);
+    }
+    return result;
   });
   if (updated.count === 0) {
     return fail("INVALID_STATE", "Tej wizyty nie można już anulować.", 422);
@@ -146,6 +158,17 @@ export async function cancelBooking(input: {
   // Powiadomienia best-effort i po odpowiedzi — poczta nie może opóźniać ani
   // wywracać anulowania (sendBookingCancellationEmails sam też nie rzuca).
   after(() => sendBookingCancellationEmails(booking.id));
+
+  // Webhooki integratorów — również po odpowiedzi i best-effort (emitEvent
+  // sam nie rzuca); cudzy serwer nie może opóźnić anulowania.
+  after(() =>
+    emitEvent(booking.businessId, "booking.cancelled", {
+      bookingId: booking.id,
+      status: "CANCELLED_BY_CUSTOMER",
+      cancelledAt: cancelledAt.toISOString(),
+      reason: input.reason ?? null,
+    }),
+  );
 
   return {
     ok: true,

@@ -18,15 +18,18 @@ import { LargePartyCard } from "@/components/restaurant/reservation-widget";
 import { WaitlistForm } from "@/components/restaurant/waitlist-form";
 import { useTableAvailability } from "@/components/restaurant/use-availability";
 import {
-  GUEST_AREA_LABELS,
-  MEAL_PERIODS,
   capitalizeFirst,
+  guestAreaLabel,
   isClosedOnDay,
   isoDayLabel,
   mealPeriod,
+  mealPeriodLabel,
+  MEAL_PERIODS,
   nextLocalDays,
   partySizeGenitive,
   partySizeLabel,
+  partyTooLargeMessage,
+  partyTooSmallMessage,
   turnTimeLabel,
 } from "@/components/restaurant/format";
 import {
@@ -35,6 +38,7 @@ import {
   type RestaurantSlot,
   type TableBookingResult,
 } from "@/components/restaurant/types";
+import { useTranslations } from "@/i18n/client";
 
 /**
  * Flow rezerwacji stolika: goście → godzina → dane → potwierdzenie.
@@ -47,7 +51,8 @@ import {
  */
 
 const DEFAULT_PARTY_SIZE = 2;
-const DAYS_IN_STRIP = 14;
+/** Górna granica paska dni; faktyczną długość ogranicza `maxAdvanceDays`. */
+const DAYS_IN_STRIP_MAX = 14;
 /** Ile dni sondujemy w poszukiwaniu najbliższego wolnego stolika. */
 const PROBE_DAYS = 8;
 
@@ -62,11 +67,12 @@ const isArea = (value: string | null): value is RestaurantArea =>
   value !== null && value in RestaurantArea;
 
 function BackCircle({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslations();
   return (
     <button
       type="button"
       onClick={onClick}
-      aria-label="Wstecz"
+      aria-label={t("common.back")}
       className="mb-4 flex size-[34px] items-center justify-center rounded-full border-[1.5px] border-border-strong bg-card text-sm"
     >
       ←
@@ -77,10 +83,19 @@ function BackCircle({ onClick }: { onClick: () => void }) {
 export function TableFlow({ data }: { data: RestaurantBookingData }) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { locale } = useTranslations();
 
+  // Pasek dni nie może wychodzić poza horyzont rezerwacji lokalu: silnik
+  // odrzuca każdy dzień powyżej `maxAdvanceDays`, więc dni 8–14 przy horyzoncie
+  // 7 pokazywały „Brak wolnych stolików" i formularz listy oczekujących.
+  const daysInStrip = Math.max(
+    1,
+    Math.min(DAYS_IN_STRIP_MAX, data.maxAdvanceDays + 1),
+  );
   const days = useMemo(
-    () => nextLocalDays(data.timezone, DAYS_IN_STRIP, new Date(data.nowIso)),
-    [data.timezone, data.nowIso],
+    () =>
+      nextLocalDays(data.timezone, daysInStrip, new Date(data.nowIso), locale),
+    [data.timezone, data.nowIso, daysInStrip, locale],
   );
   const todayIso = days[0].iso;
 
@@ -96,7 +111,12 @@ export function TableFlow({ data }: { data: RestaurantBookingData }) {
     dateParam && days.some((day) => day.iso === dateParam)
       ? dateParam
       : todayIso;
-  const time = searchParams.get("godzina");
+  // `godzina` idzie prosto do new Date() i Intl.DateTimeFormat — bez walidacji
+  // „?godzina=abc" dawało Invalid Date i RangeError w renderze (biały ekran).
+  // Nieparsowalna wartość degraduje flow do kroku wyboru godziny.
+  const timeParam = searchParams.get("godzina");
+  const time =
+    timeParam && Number.isFinite(Date.parse(timeParam)) ? timeParam : null;
   const krokParam = searchParams.get("krok");
 
   const [booking, setBooking] = useState<TableBookingResult | null>(null);
@@ -114,13 +134,16 @@ export function TableFlow({ data }: { data: RestaurantBookingData }) {
 
   const tooLarge =
     data.maxPartySizeOnline !== null && partySize > data.maxPartySizeOnline;
+  // Dolna granica: żaden stolik nie ma tak niskiego `capacityMin`.
+  const tooSmall = partySize < data.minPartySizeSeatable;
+  const outOfRange = tooLarge || tooSmall;
 
   const step: "goscie" | "godzina" | "dane" | "sukces" =
     krokParam === "sukces" && booking
       ? "sukces"
-      : krokParam === "dane" && time && !tooLarge
+      : krokParam === "dane" && time && !outOfRange
         ? "dane"
-        : (krokParam === "godzina" || krokParam === "dane") && !tooLarge
+        : (krokParam === "godzina" || krokParam === "dane") && !outOfRange
           ? "godzina"
           : "goscie";
 
@@ -170,6 +193,7 @@ export function TableFlow({ data }: { data: RestaurantBookingData }) {
               area={area}
               durationMin={durationMin}
               tooLarge={tooLarge}
+              tooSmall={tooSmall}
               onBack={() => router.push(`/b/${data.slug}`)}
               onChange={(patch) => setParams(patch, "replace")}
               onNext={() => setParams({ krok: "godzina" })}
@@ -246,10 +270,11 @@ function FlowSummary({
   startAtIso: string | null;
   durationMin: number;
 }) {
+  const { locale, t } = useTranslations();
   return (
     <aside className="hidden lg:sticky lg:top-8 lg:block">
       <div className="rounded-2xl border-[1.5px] border-border-strong bg-card p-5">
-        <div className="meta-label">Podsumowanie</div>
+        <div className="meta-label">{t("bf.summary")}</div>
         <div className="mt-1 font-display text-lg font-bold tracking-tight">
           {data.name}
         </div>
@@ -261,29 +286,33 @@ function FlowSummary({
 
         <dl className="flex flex-col gap-2.5 text-[13px]">
           <div className="flex justify-between gap-3">
-            <dt className="flex-none text-muted-foreground">Goście</dt>
+            <dt className="flex-none text-muted-foreground">{t("tf.guests")}</dt>
             <dd className="text-right font-semibold">
-              {partySizeLabel(partySize)}
+              {partySizeLabel(partySize, locale)}
             </dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="flex-none text-muted-foreground">Strefa</dt>
+            <dt className="flex-none text-muted-foreground">{t("tf.zone")}</dt>
             <dd className="text-right font-semibold">
-              {area ? GUEST_AREA_LABELS[area] : "Bez preferencji"}
+              {area ? guestAreaLabel(area, locale) : t("tf.noPreference")}
             </dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="flex-none text-muted-foreground">Termin</dt>
+            <dt className="flex-none text-muted-foreground">{t("bf.term")}</dt>
             <dd className="text-right font-mono font-medium">
               {startAtIso ? (
-                `${formatDayShort(new Date(startAtIso), data.timezone)}, ${formatTimeInZone(new Date(startAtIso), data.timezone)}`
+                `${formatDayShort(new Date(startAtIso), data.timezone, locale)}, ${formatTimeInZone(new Date(startAtIso), data.timezone)}`
               ) : (
-                <span className="text-[#8f8b81]">{isoDayLabel(date)}</span>
+                <span className="text-[#8f8b81]">
+                  {isoDayLabel(date, locale)}
+                </span>
               )}
             </dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="flex-none text-muted-foreground">Stolik na</dt>
+            <dt className="flex-none text-muted-foreground">
+              {t("tf.tableOn")}
+            </dt>
             <dd className="text-right font-mono">
               {turnTimeLabel(durationMin)}
             </dd>
@@ -293,8 +322,7 @@ function FlowSummary({
         <div className="my-4 h-px bg-border" />
 
         <p className="text-[11.5px] leading-relaxed text-muted-foreground">
-          Rezerwacja stolika jest bezpłatna. Odwołasz ją bezpłatnie do{" "}
-          <b>{data.cancellationCutoffHours} h</b> przed wizytą.
+          {t("tf.summaryNote", { hours: data.cancellationCutoffHours })}
         </p>
       </div>
     </aside>
@@ -313,6 +341,7 @@ function GuestsStep({
   area,
   durationMin,
   tooLarge,
+  tooSmall,
   onBack,
   onChange,
   onNext,
@@ -324,10 +353,12 @@ function GuestsStep({
   area: RestaurantArea | null;
   durationMin: number;
   tooLarge: boolean;
+  tooSmall: boolean;
   onBack: () => void;
   onChange: (patch: Record<string, string | null>) => void;
   onNext: () => void;
 }) {
+  const { locale, t } = useTranslations();
   const chip = (active: boolean) =>
     `flex min-h-11 flex-none items-center gap-1.5 rounded-full px-3.5 text-[12.5px] font-semibold ${
       active
@@ -338,31 +369,50 @@ function GuestsStep({
   return (
     <div>
       <BackCircle onClick={onBack} />
-      <div className="meta-label">Krok 1 / 3 · Goście</div>
+      <div className="meta-label">{t("tf.step1")}</div>
       <h1 className="mt-1.5 mb-1 font-display text-[29px] leading-[1.05] font-extrabold tracking-tight">
-        Ile Was będzie?
+        {t("rw.howMany")}
       </h1>
       <p className="mb-4 text-[13px] text-muted-foreground">
-        {data.name} · stolik na {turnTimeLabel(durationMin)}
+        {data.name} · {t("tf.tableFor", { turn: turnTimeLabel(durationMin) })}
       </p>
 
       <PartySizePills
         value={partySize}
         onChange={(value) => onChange({ osoby: String(value) })}
+        min={data.minPartySizeSeatable}
         max={Math.max(12, data.maxPartySizeSeatable)}
       />
 
       {tooLarge ? (
         <LargePartyCard
           className="mt-4 rounded-2xl border-[1.5px] border-border-strong bg-warning-soft p-4"
-          message={`Dla grup powyżej ${data.maxPartySizeOnline} osób zadzwoń do lokalu${data.phone ? `: ${data.phone}` : ""}.`}
+          message={partyTooLargeMessage(
+            data.maxPartySizeOnline ?? partySize,
+            data.phone,
+            locale,
+          )}
+          phone={data.phone}
+        />
+      ) : null}
+
+      {tooSmall ? (
+        <LargePartyCard
+          className="mt-4 rounded-2xl border-[1.5px] border-border-strong bg-warning-soft p-4"
+          label={t("lp.smallLabel")}
+          title={t("lp.smallTitle")}
+          message={partyTooSmallMessage(
+            data.minPartySizeSeatable,
+            data.phone,
+            locale,
+          )}
           phone={data.phone}
         />
       ) : null}
 
       {data.areas.length > 1 ? (
         <>
-          <div className="meta-label mt-6 mb-2">Preferowana strefa</div>
+          <div className="meta-label mt-6 mb-2">{t("tf.preferredZone")}</div>
           <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-0.5">
             <button
               type="button"
@@ -370,7 +420,7 @@ function GuestsStep({
               onClick={() => onChange({ strefa: null })}
               className={chip(area === null)}
             >
-              Bez preferencji
+              {t("tf.noPreference")}
             </button>
             {data.areas.map((value) => (
               <button
@@ -381,17 +431,17 @@ function GuestsStep({
                 className={chip(area === value)}
               >
                 <AreaIcon area={value} className="size-3.5" />
-                {GUEST_AREA_LABELS[value]}
+                {guestAreaLabel(value, locale)}
               </button>
             ))}
           </div>
           <p className="mt-2 text-[11.5px] leading-relaxed text-[#8f8b81]">
-            Bez preferencji dostajesz najwięcej godzin — stolik dobieramy sami.
+            {t("tf.noPrefHint")}
           </p>
         </>
       ) : null}
 
-      <div className="meta-label mt-6 mb-2">Dzień</div>
+      <div className="meta-label mt-6 mb-2">{t("tf.day")}</div>
       <DayStrip
         days={days}
         selected={date}
@@ -401,14 +451,14 @@ function GuestsStep({
       <button
         type="button"
         onClick={onNext}
-        disabled={tooLarge}
+        disabled={tooLarge || tooSmall}
         className="mt-5 min-h-11 w-full rounded-[14px] bg-primary p-4 text-[15px] font-bold text-primary-foreground disabled:opacity-60"
       >
-        Pokaż wolne godziny
+        {t("tf.showHours")}
       </button>
       <p className="mt-2 text-center text-[11px] text-[#8f8b81]">
-        {isoDayLabel(date)} · {partySizeLabel(partySize)} ·{" "}
-        {area ? GUEST_AREA_LABELS[area] : "bez preferencji strefy"}
+        {isoDayLabel(date, locale)} · {partySizeLabel(partySize, locale)} ·{" "}
+        {area ? guestAreaLabel(area, locale) : t("tf.noPreferenceZone")}
       </p>
     </div>
   );
@@ -439,6 +489,7 @@ function TimeStep({
   onPickDay: (iso: string) => void;
   onPickSlot: (slot: RestaurantSlot) => void;
 }) {
+  const { locale, t } = useTranslations();
   const availability = useTableAvailability({
     slug: data.slug,
     date,
@@ -451,18 +502,24 @@ function TimeStep({
     !availability.loading && outcome?.kind === "ready" && slots.length === 0;
 
   // Sonda po kolejnych dniach odpala się dopiero, gdy wybrany dzień jest
-  // pusty — normalna ścieżka to jedno zapytanie o jeden dzień.
+  // pusty — normalna ścieżka to jedno zapytanie o jeden dzień. Nie wychodzi
+  // poza pasek dni, czyli poza horyzont rezerwacji lokalu.
+  const dayIsoSet = new Set(days.map((day) => day.iso));
+  const probeDays = Math.max(1, Math.min(PROBE_DAYS, days.length));
   const probe = useTableAvailability({
     slug: data.slug,
     date: isEmpty ? date : null,
     partySize,
     area,
-    days: PROBE_DAYS,
+    days: probeDays,
   });
   const nearestDay =
     probe.outcome?.kind === "ready"
       ? (probe.outcome.data.days ?? []).find(
-          (day) => day.date !== date && day.slots.length > 0,
+          (day) =>
+            day.date !== date &&
+            day.slots.length > 0 &&
+            dayIsoSet.has(day.date),
         )
       : undefined;
 
@@ -478,13 +535,13 @@ function TimeStep({
   return (
     <div>
       <BackCircle onClick={onBack} />
-      <div className="meta-label">Krok 2 / 3 · Godzina</div>
+      <div className="meta-label">{t("tf.step2")}</div>
       <h1 className="mt-1.5 mb-1 font-display text-[29px] leading-[1.05] font-extrabold tracking-tight">
-        O której siadacie?
+        {t("tf.whenSit")}
       </h1>
       <p className="mb-1 text-[13px] text-muted-foreground">
-        {partySizeLabel(partySize)} ·{" "}
-        {area ? GUEST_AREA_LABELS[area] : "bez preferencji strefy"}
+        {partySizeLabel(partySize, locale)} ·{" "}
+        {area ? guestAreaLabel(area, locale) : t("tf.noPreferenceZone")}
       </p>
 
       <DayStrip
@@ -495,9 +552,9 @@ function TimeStep({
       />
 
       <div className="mt-3.5 mb-2.5 flex items-center justify-between gap-3">
-        <div className="meta-label">{isoDayLabel(date)}</div>
+        <div className="meta-label">{isoDayLabel(date, locale)}</div>
         <div className="font-mono text-[10px] text-[#8f8b81]">
-          stolik na {turnTimeLabel(durationMin)}
+          {t("tf.tableFor", { turn: turnTimeLabel(durationMin) })}
         </div>
       </div>
 
@@ -510,7 +567,23 @@ function TimeStep({
       ) : outcome?.kind === "tooLarge" ? (
         <LargePartyCard
           className="rounded-2xl border-[1.5px] border-border-strong bg-warning-soft p-4"
-          message={outcome.info.message}
+          message={partyTooLargeMessage(
+            outcome.info.maxPartySizeOnline,
+            outcome.info.phone ?? data.phone,
+            locale,
+          )}
+          phone={outcome.info.phone ?? data.phone}
+        />
+      ) : outcome?.kind === "tooSmall" ? (
+        <LargePartyCard
+          className="rounded-2xl border-[1.5px] border-border-strong bg-warning-soft p-4"
+          label={t("lp.smallLabel")}
+          title={t("lp.smallTitle")}
+          message={partyTooSmallMessage(
+            outcome.info.minPartySizeSeatable,
+            outcome.info.phone ?? data.phone,
+            locale,
+          )}
           phone={outcome.info.phone ?? data.phone}
         />
       ) : outcome?.kind === "error" ? (
@@ -523,23 +596,29 @@ function TimeStep({
             onClick={availability.reload}
             className="min-h-11 rounded-full border-[1.5px] border-border-strong bg-card px-4 text-[13px] font-semibold"
           >
-            Spróbuj ponownie
+            {t("common.retry")}
           </button>
         </div>
       ) : isEmpty ? (
         <div className="flex flex-col gap-3.5">
           <div>
             <h2 className="mb-1.5 font-display text-xl leading-tight font-extrabold tracking-tight">
-              {closedDay ? "Tego dnia zamknięte" : "Brak wolnych stolików"}
+              {closedDay ? t("tf.closedThatDay") : t("tf.noTables")}
             </h2>
             <p className="text-[12.5px] leading-relaxed text-muted-foreground">
               {closedDay
-                ? `${capitalizeFirst(isoDayLabel(date))} — lokal nieczynny. Wybierz inny dzień.`
-                : `${capitalizeFirst(isoDayLabel(date))} — nie mamy już stolika dla ${partySizeGenitive(partySize)}${
-                    area
-                      ? ` w strefie ${GUEST_AREA_LABELS[area].toLowerCase()}`
-                      : ""
-                  }.`}
+                ? t("tf.closedText", {
+                    day: capitalizeFirst(isoDayLabel(date, locale)),
+                  })
+                : t("tf.noTableForGroup", {
+                    day: capitalizeFirst(isoDayLabel(date, locale)),
+                    party: partySizeGenitive(partySize, locale),
+                    zone: area
+                      ? t("tf.inZone", {
+                          area: guestAreaLabel(area, locale).toLowerCase(),
+                        })
+                      : "",
+                  })}
             </p>
           </div>
 
@@ -553,7 +632,9 @@ function TimeStep({
             >
               <div className="min-w-0">
                 <div className="text-[12.5px] font-bold">
-                  Najbliżej wolne: {isoDayLabel(nearestDay.date)}
+                  {t("tf.nearestFree", {
+                    day: isoDayLabel(nearestDay.date, locale),
+                  })}
                 </div>
                 <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
                   {nearestDay.slots
@@ -568,8 +649,7 @@ function TimeStep({
             </button>
           ) : (
             <p className="rounded-xl border border-border bg-muted/60 p-3.5 text-[12.5px] text-muted-foreground">
-              W najbliższych dniach też nie widzimy wolnego stolika dla tej
-              grupy. Spróbuj innej liczby osób albo zadzwoń do lokalu.
+              {t("tf.noneNearby")}
             </p>
           )}
 
@@ -583,7 +663,9 @@ function TimeStep({
         <>
           {groups.map((group) => (
             <div key={group.label}>
-              <div className="mt-3.5 mb-2 text-xs font-bold">{group.label}</div>
+              <div className="mt-3.5 mb-2 text-xs font-bold">
+                {mealPeriodLabel(group.label, locale)}
+              </div>
               <div className="grid grid-cols-3 gap-2 md:grid-cols-4 lg:grid-cols-5">
                 {group.slots.map((slot) => (
                   <button
@@ -599,9 +681,11 @@ function TimeStep({
             </div>
           ))}
           <p className="mt-4 rounded-xl border border-border bg-muted/60 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
-            Stolik na <b>{turnTimeLabel(durationMin)}</b> — tyle trzymamy go dla{" "}
-            {partySizeGenitive(partySize)}. Godziny w strefie lokalu (
-            {data.timezone}).
+            {t("tf.tableOn")} <b>{turnTimeLabel(durationMin)}</b>{" "}
+            {t("tf.holdNotePrefix", {
+              party: partySizeGenitive(partySize, locale),
+              tz: data.timezone,
+            })}
           </p>
         </>
       )}
@@ -636,6 +720,7 @@ function DetailsStep({
   onConflictRetry: () => void;
   onSuccess: (booking: TableBookingResult) => void;
 }) {
+  const { locale, t } = useTranslations();
   const [accepted, setAccepted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -650,20 +735,20 @@ function DetailsStep({
     setError(null);
     setConflict(null);
     if (!accepted) {
-      setError("Potwierdź zasady odwołania rezerwacji.");
+      setError(t("tf.errAccept"));
       return;
     }
     if (isGuest) {
       if (guest.name.trim().length < 2) {
-        setError("Podaj imię i nazwisko.");
+        setError(t("form.errName"));
         return;
       }
       if (!/^\S+@\S+\.\S+$/.test(guest.email.trim())) {
-        setError("Podaj poprawny adres e-mail.");
+        setError(t("form.errEmail"));
         return;
       }
       if (guest.phone.trim().length < 7) {
-        setError("Podaj poprawny numer telefonu — lokal dzwoni w razie zmian.");
+        setError(t("tf.errPhoneCalls"));
         return;
       }
     }
@@ -701,17 +786,13 @@ function DetailsStep({
         return;
       }
       if (response.status === 409) {
-        setConflict(
-          json?.message ??
-            "Ten stolik został właśnie zajęty przez kogoś innego.",
-        );
+        // Komunikat z API jest zawsze polski — konflikt opisujemy słownikiem.
+        setConflict(t("tf.conflict409"));
         return;
       }
-      setError(
-        json?.message ?? "Nie udało się zarezerwować stolika. Spróbuj ponownie.",
-      );
+      setError(t("tf.createFailed"));
     } catch {
-      setError("Błąd połączenia. Sprawdź internet i spróbuj ponownie.");
+      setError(t("common.connectionError"));
     } finally {
       setSubmitting(false);
     }
@@ -720,9 +801,9 @@ function DetailsStep({
   return (
     <div>
       <BackCircle onClick={onBack} />
-      <div className="meta-label">Krok 3 / 3 · Dane</div>
+      <div className="meta-label">{t("tf.step3")}</div>
       <h1 className="mt-1.5 mb-[18px] font-display text-[29px] leading-[1.05] font-extrabold tracking-tight">
-        Prawie przy stole.
+        {t("tf.almostAtTable")}
       </h1>
 
       {conflict ? (
@@ -731,18 +812,17 @@ function DetailsStep({
             !
           </div>
           <div className="mb-1.5 font-display text-[21px] leading-tight font-extrabold tracking-tight">
-            Ten stolik właśnie zniknął
+            {t("tf.tableGone")}
           </div>
           <p className="mb-3.5 text-[12.5px] leading-relaxed text-foreground/80">
-            {conflict} Twoje dane zostają — wybierz inną godzinę, reszta jest
-            już wypełniona.
+            {conflict} {t("tf.tableGoneText")}
           </p>
           <button
             type="button"
             onClick={onConflictRetry}
             className="min-h-11 w-full rounded-[10px] bg-primary p-3 text-[13px] font-bold text-primary-foreground"
           >
-            Pokaż wolne godziny
+            {t("tf.showHours")}
           </button>
         </div>
       ) : null}
@@ -750,30 +830,30 @@ function DetailsStep({
       <div className="mb-5 rounded-2xl border border-[#e2ddd2] bg-[#f7f4ef] p-[15px] dark:border-border dark:bg-secondary">
         <div className="flex justify-between gap-3 text-sm font-semibold">
           <span>{data.name}</span>
-          <span className="font-mono">bezpłatnie</span>
+          <span className="font-mono">{t("tf.free")}</span>
         </div>
         <div className="my-[11px] h-px bg-[#e2ddd2] dark:bg-border" />
         <div className="flex justify-between text-[13px] text-foreground/80">
-          <span>Termin</span>
+          <span>{t("bf.term")}</span>
           <span className="font-mono font-medium text-foreground">
-            {formatDayShort(startAt, data.timezone)} ·{" "}
+            {formatDayShort(startAt, data.timezone, locale)} ·{" "}
             {formatTimeInZone(startAt, data.timezone)}
           </span>
         </div>
         <div className="mt-1.5 flex justify-between text-[13px] text-foreground/80">
-          <span>Goście</span>
+          <span>{t("tf.guests")}</span>
           <span className="font-semibold text-foreground">
-            {partySizeLabel(partySize)}
+            {partySizeLabel(partySize, locale)}
           </span>
         </div>
         <div className="mt-1.5 flex justify-between text-[13px] text-foreground/80">
-          <span>Strefa</span>
+          <span>{t("tf.zone")}</span>
           <span className="font-semibold text-foreground">
-            {area ? GUEST_AREA_LABELS[area] : "Bez preferencji"}
+            {area ? guestAreaLabel(area, locale) : t("tf.noPreference")}
           </span>
         </div>
         <div className="mt-1.5 flex justify-between text-[13px] text-foreground/80">
-          <span>Stolik na</span>
+          <span>{t("tf.tableOn")}</span>
           <span className="font-mono text-foreground">
             {turnTimeLabel(durationMin)}
           </span>
@@ -787,7 +867,7 @@ function DetailsStep({
               htmlFor="table-name"
               className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
             >
-              Imię i nazwisko
+              {t("form.fullName")}
             </label>
             <input
               id="table-name"
@@ -802,9 +882,9 @@ function DetailsStep({
               htmlFor="table-phone"
               className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
             >
-              Telefon{" "}
+              {t("form.phone")}{" "}
               <span className="font-normal text-[#8f8b81]">
-                · lokal dzwoni w razie zmian
+                {t("tf.phoneHintCalls")}
               </span>
             </label>
             <input
@@ -822,7 +902,7 @@ function DetailsStep({
               htmlFor="table-email"
               className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
             >
-              E-mail
+              {t("form.email")}
             </label>
             <input
               id="table-email"
@@ -837,9 +917,9 @@ function DetailsStep({
         </div>
       ) : (
         <div className="rounded-2xl border border-border bg-card p-4">
-          <div className="meta-label mb-1.5">Rezerwujesz jako</div>
+          <div className="meta-label mb-1.5">{t("bf.bookingAs")}</div>
           <div className="text-sm font-semibold">
-            {data.user?.name ?? "Twoje konto"}
+            {data.user?.name ?? t("bf.yourAccount")}
           </div>
           {data.user?.email ? (
             <div className="mt-0.5 text-[13px] text-muted-foreground">
@@ -854,9 +934,9 @@ function DetailsStep({
           htmlFor="table-note"
           className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
         >
-          Uwagi{" "}
+          {t("tf.notes")}{" "}
           <span className="font-normal text-[#8f8b81]">
-            · np. stolik przy oknie, urodziny, wózek
+            {t("tf.notesHint")}
           </span>
         </label>
         <textarea
@@ -865,7 +945,7 @@ function DetailsStep({
           onChange={(event) => onGuestChange({ note: event.target.value })}
           rows={3}
           maxLength={500}
-          placeholder="Poprosimy stolik przy oknie."
+          placeholder={t("tf.notesPlaceholder")}
           className={`${inputClass} resize-none`}
         />
       </div>
@@ -878,12 +958,9 @@ function DetailsStep({
           className="mt-0.5 size-[18px] flex-none accent-[#143d31]"
         />
         <span className="text-[11.5px] leading-relaxed text-foreground/80">
-          <b className="text-xs">Zasady odwołania</b>
+          <b className="text-xs">{t("tf.acceptTitle")}</b>
           <br />
-          Rezerwację odwołasz bezpłatnie do{" "}
-          <b>{data.cancellationCutoffHours} h</b> przed godziną rezerwacji.
-          Później stolik przepada. Przy spóźnieniu powyżej 15 minut lokal może
-          zwolnić stolik.
+          {t("tf.acceptText", { hours: data.cancellationCutoffHours })}
         </span>
       </label>
 
@@ -900,11 +977,13 @@ function DetailsStep({
         className="mt-[18px] min-h-11 w-full rounded-[14px] bg-primary p-4 text-[15px] font-bold text-primary-foreground disabled:opacity-60"
       >
         {submitting
-          ? "Rezerwuję…"
-          : `Rezerwuję stolik · ${formatTimeInZone(startAt, data.timezone)}`}
+          ? t("bf.submitting")
+          : t("tf.bookCta", {
+              time: formatTimeInZone(startAt, data.timezone),
+            })}
       </button>
       <p className="mt-2 text-center text-[11px] text-[#8f8b81]">
-        Rezerwacja stolika jest bezpłatna. Płacisz tylko za to, co zamówisz.
+        {t("tf.freeNote")}
       </p>
     </div>
   );
@@ -921,6 +1000,7 @@ function SuccessScreen({
   booking: TableBookingResult;
   slug: string;
 }) {
+  const { locale, t } = useTranslations();
   const startAt = new Date(booking.startAt);
   const deadline = new Date(booking.cancellationDeadline);
 
@@ -930,17 +1010,16 @@ function SuccessScreen({
         <Check aria-hidden className="size-7" />
       </div>
       <h1 className="mb-2 font-display text-[32px] leading-none font-extrabold tracking-tight">
-        Stolik zarezerwowany.
+        {t("tf.bookedTitle")}
       </h1>
       <p className="mb-[22px] text-sm leading-relaxed text-foreground/80">
-        Potwierdzenie poszło e-mailem. Pokaż obsłudze numer rezerwacji albo
-        podaj nazwisko przy wejściu.
+        {t("tf.successNote")}
       </p>
 
       <div className="overflow-hidden rounded-2xl border-[1.5px] border-border-strong bg-card">
         <div className="border-b border-dashed border-[#d8d2c4] p-4 dark:border-border">
           <div className="meta-label">
-            {formatDayFull(startAt, booking.timezone)}
+            {formatDayFull(startAt, booking.timezone, locale)}
           </div>
           <div className="my-1 font-display text-[38px] leading-none font-extrabold tracking-tight">
             {formatTimeInZone(startAt, booking.timezone)}
@@ -948,11 +1027,11 @@ function SuccessScreen({
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold">
             <span className="flex items-center gap-1.5">
               <Users aria-hidden className="size-4" />
-              {partySizeLabel(booking.partySize)}
+              {partySizeLabel(booking.partySize, locale)}
             </span>
             <span className="flex items-center gap-1.5 font-mono text-[13px] font-medium text-muted-foreground">
               <CalendarClock aria-hidden className="size-4" />
-              stolik na {turnTimeLabel(booking.durationMin)}
+              {t("tf.tableFor", { turn: turnTimeLabel(booking.durationMin) })}
             </span>
           </div>
           <div className="mt-0.5 text-[13px] text-muted-foreground">
@@ -965,7 +1044,7 @@ function SuccessScreen({
               {booking.address}
             </div>
             <div className="mt-[3px] font-mono text-[11px] text-[#8f8b81]">
-              Numer rezerwacji
+              {t("tf.bookingNumber")}
             </div>
           </div>
           <div className="flex-none font-mono text-base font-medium">
@@ -975,15 +1054,12 @@ function SuccessScreen({
       </div>
 
       <div className="mt-4 rounded-2xl border border-border bg-accent p-4">
-        <div className="meta-label">Odwołanie</div>
+        <div className="meta-label">{t("tf.cancellation")}</div>
         <p className="mt-1 text-[12.5px] leading-relaxed text-foreground/80">
-          Rezerwację odwołasz bezpłatnie do{" "}
-          <b>
-            {formatDayShort(deadline, booking.timezone)},{" "}
-            {formatTimeInZone(deadline, booking.timezone)}
-          </b>{" "}
-          (na {booking.cancellationCutoffHours} h przed). Później stolik
-          przepada.
+          {t("tf.cancelUntil", {
+            deadline: `${formatDayShort(deadline, booking.timezone, locale)}, ${formatTimeInZone(deadline, booking.timezone)}`,
+            hours: booking.cancellationCutoffHours,
+          })}
         </p>
       </div>
 
@@ -991,13 +1067,13 @@ function SuccessScreen({
         href="/konto"
         className="mt-4 flex min-h-11 w-full items-center justify-center rounded-xl border-[1.5px] border-border-strong bg-card text-[13px] font-semibold"
       >
-        Moje rezerwacje
+        {t("tf.myBookings")}
       </Link>
       <Link
         href={`/b/${slug}`}
         className="mt-2 flex min-h-11 w-full items-center justify-center rounded-xl bg-primary text-sm font-bold text-primary-foreground"
       >
-        Wróć do profilu {booking.restaurantName}
+        {t("tf.backToProfileOf", { name: booking.restaurantName })}
       </Link>
     </div>
   );

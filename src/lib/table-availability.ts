@@ -196,6 +196,11 @@ const localWeekday = (day: LocalDate): number =>
  * Czas zajęcia stolika dla danej liczby osób: pierwsza pasująca reguła
  * (zakresy nie powinny się nakładać), a gdy żadna nie pasuje — wartość
  * domyślna lokalizacji.
+ *
+ * Wyjątek: grupa WIĘKSZA niż najwyższa reguła dostaje regułę o największym
+ * `partySizeMax`, nie wartość domyślną. Przy regułach 1–2:90, 3–4:120,
+ * 5–8:150 dziewięcioosobowa grupa dostawała wcześniej 90 minut, czyli KRÓTSZY
+ * czas niż czwórka — stolik szedł do kolejnego gościa, zanim ta wstała od stołu.
  */
 export function turnTimeForPartySize(
   rules: TurnTimeRuleInput[],
@@ -205,7 +210,17 @@ export function turnTimeForPartySize(
   const rule = rules.find(
     (r) => partySize >= r.partySizeMin && partySize <= r.partySizeMax,
   );
-  return rule?.durationMin ?? defaultTurnTimeMin;
+  if (rule) return rule.durationMin;
+
+  const highest = rules.reduce<TurnTimeRuleInput | null>(
+    (best, candidate) =>
+      best === null || candidate.partySizeMax > best.partySizeMax
+        ? candidate
+        : best,
+    null,
+  );
+  if (highest && partySize > highest.partySizeMax) return highest.durationMin;
+  return defaultTurnTimeMin;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,18 +329,22 @@ function buildOptions(input: ComputeTableAvailabilityInput): TableOption[] {
   const wanted = input.restrictTo;
   if (!wanted) return options;
 
+  // Oba zawężenia obowiązują JEDNOCZEŚNIE. Wcześniej `combinationId` wygrywał
+  // i po cichu unieważniał `tableIds`, więc rezerwacja lądowała na stolikach
+  // zestawienia, a nie na tych, o które prosił klient.
+  let filtered = options;
   if (wanted.combinationId) {
-    return options.filter(
+    filtered = filtered.filter(
       (option) => option.combinationId === wanted.combinationId,
     );
   }
   if (wanted.tableIds && wanted.tableIds.length > 0) {
     const requested = [...wanted.tableIds].sort().join("|");
-    return options.filter(
+    filtered = filtered.filter(
       (option) => [...option.tableIds].sort().join("|") === requested,
     );
   }
-  return options;
+  return filtered;
 }
 
 // ---------------------------------------------------------------------------

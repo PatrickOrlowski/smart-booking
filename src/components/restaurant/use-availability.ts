@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { RestaurantArea } from "@/generated/prisma/enums";
-import type { AvailabilityResponse, PartyTooLargeResponse } from "./types";
+import { useTranslations } from "@/i18n/client";
+import type {
+  AvailabilityResponse,
+  PartyTooLargeResponse,
+  PartyTooSmallResponse,
+} from "./types";
 
 /**
  * Pobieranie wolnych godzin na stolik z GET /api/v1/restaurants/[slug]/availability.
@@ -19,6 +24,7 @@ import type { AvailabilityResponse, PartyTooLargeResponse } from "./types";
 export type AvailabilityOutcome =
   | { kind: "ready"; data: AvailabilityResponse }
   | { kind: "tooLarge"; info: PartyTooLargeResponse }
+  | { kind: "tooSmall"; info: PartyTooSmallResponse }
   | { kind: "error"; message: string };
 
 export type UseAvailabilityOptions = {
@@ -60,6 +66,7 @@ export function useTableAvailability(options: UseAvailabilityOptions): {
     days = 1,
     initial = null,
   } = options;
+  const { t } = useTranslations();
 
   const [reloadKey, setReloadKey] = useState(0);
   const [state, setState] = useState<{
@@ -116,13 +123,23 @@ export function useTableAvailability(options: UseAvailabilityOptions): {
           });
           return;
         }
+        // Symetrycznie dla dolnej granicy: lokal z samymi stolikami „od 2"
+        // nie sadza pojedynczych gości — to nie brak miejsc, tylko zasada.
+        if (response.status === 422 && payload?.error === "PARTY_TOO_SMALL") {
+          setState({
+            key: requestKey,
+            outcome: {
+              kind: "tooSmall",
+              info: json as PartyTooSmallResponse,
+            },
+          });
+          return;
+        }
         setState({
           key: requestKey,
           outcome: {
             kind: "error",
-            message:
-              payload?.message ??
-              "Nie udało się pobrać wolnych godzin. Spróbuj ponownie.",
+            message: t("rest.errorSlots"),
           },
         });
       })
@@ -132,13 +149,13 @@ export function useTableAvailability(options: UseAvailabilityOptions): {
           key: requestKey,
           outcome: {
             kind: "error",
-            message: "Błąd połączenia. Sprawdź internet i spróbuj ponownie.",
+            message: t("common.connectionError"),
           },
         });
       });
 
     return () => controller.abort();
-  }, [requestKey, seedUsable, slug, date, partySize, area, days]);
+  }, [requestKey, seedUsable, slug, date, partySize, area, days, t]);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
 

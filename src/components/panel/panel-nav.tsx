@@ -17,6 +17,9 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/panel/aktywnosc", label: "Aktywność" },
   { href: "/panel/ustawienia", label: "Ustawienia" },
   { href: "/panel/plan", label: "Plan" },
+  { href: "/panel/promocje", label: "Promocje" },
+  { href: "/panel/serie", label: "Serie" },
+  { href: "/panel/integracje", label: "Integracje" },
 ];
 
 /** Pozycje wyłącznie dla restauracji — salon ich nie widzi. */

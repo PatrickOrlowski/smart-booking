@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { formatMinutes, timeOptions } from "@/components/panel/format";
 import type { TurnTimeRuleView } from "@/components/panel/host-walkin-dialog";
+import { turnTimeFor } from "@/components/restaurant/types";
 import { convertWaitlistEntryAction } from "@/app/panel/(dashboard)/dzis/actions";
 
 /**
@@ -84,21 +85,19 @@ export function WaitlistConvertDialog({
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
 
-  const turnTimeMin = useMemo(() => {
-    const rule = turnTimeRules
-      .filter(
-        (item) =>
-          item.partySizeMin <= entry.partySize &&
-          entry.partySize <= item.partySizeMax,
-      )
-      .sort((a, b) => a.partySizeMin - b.partySizeMin)[0];
-    return rule?.durationMin ?? defaultTurnTimeMin;
-  }, [turnTimeRules, entry.partySize, defaultTurnTimeMin]);
+  const turnTimeMin = useMemo(
+    () => turnTimeFor(turnTimeRules, entry.partySize, defaultTurnTimeMin),
+    [turnTimeRules, entry.partySize, defaultTurnTimeMin],
+  );
 
-  // Rezerwacja musi w całości mieścić się w godzinach otwarcia lokalu.
+  // Rezerwacja musi w całości mieścić się w godzinach otwarcia lokalu. Gdy
+  // czas przy stole nie zmieści się do zamknięcia, lista godzin zostaje PUSTA —
+  // wcześniej `Math.max` podsuwał godzinę otwarcia, którą serwer i tak odrzucał.
+  const fitsBeforeClose = closeMin - turnTimeMin >= openMin;
   const choices = useMemo(
-    () => timeOptions(openMin, Math.max(openMin, closeMin - turnTimeMin), 15),
-    [openMin, closeMin, turnTimeMin],
+    () =>
+      fitsBeforeClose ? timeOptions(openMin, closeMin - turnTimeMin, 15) : [],
+    [fitsBeforeClose, openMin, closeMin, turnTimeMin],
   );
 
   const defaultStart = useMemo(() => {
@@ -225,6 +224,15 @@ export function WaitlistConvertDialog({
               </Select>
             </div>
           </div>
+
+          {choices.length === 0 ? (
+            <p className="rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-xs leading-snug text-warning-strong">
+              Do zamknięcia zostało za mało czasu: rezerwacja dla{" "}
+              {entry.partySize} os. trwa {turnTimeMin} min i nie zmieści się
+              w godzinach otwarcia ({formatMinutes(openMin)}–
+              {formatMinutes(closeMin)}). Umów gościa na inny dzień.
+            </p>
+          ) : null}
 
           <div className="rounded-lg border border-dashed border-border bg-card px-3 py-2.5 text-xs text-foreground/80">
             Czas przy stole: <b className="font-mono">{turnTimeMin} min</b>

@@ -6,7 +6,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { utcToZonedWallClock } from "@/lib/time";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  WEEKDAYS_SHORT,
   formatDateTimeLabel,
   formatDayFull,
   formatDayShort,
@@ -14,7 +13,10 @@ import {
   formatPrice,
   formatTimeInZone,
   priceLabel,
+  weekdaysShort,
 } from "@/components/marketplace/format";
+import { useTranslations } from "@/i18n/client";
+import { previewDiscountAction } from "./actions";
 
 /**
  * Flow rezerwacji klienta: pracownik → termin → dane → sukces.
@@ -63,12 +65,28 @@ type AvailabilityResponse = {
 /** Dane rezerwującego gościa — stan podniesiony do BookingFlow. */
 type GuestDetails = { name: string; phone: string; email: string };
 
+/**
+ * Zastosowany kod rabatowy. Podgląd liczy serwer (server action) — tutaj
+ * trzymamy wyłącznie wynik do pokazania; wiążąca kalkulacja i tak dzieje się
+ * przy POST /bookings, w transakcji.
+ */
+type AppliedDiscount = {
+  code: string;
+  discountCents: number;
+  subtotalCents: number;
+  totalCents: number;
+};
+
 type BookingResult = {
   id: string;
   startAt: string;
   endAt: string;
   durationMin: number;
+  /** Cena po rabacie — tyle klient płaci. */
   priceCents: number;
+  /** Cena katalogowa przed rabatem (starsze odpowiedzi jej nie mają). */
+  subtotalCents?: number;
+  discountCents?: number;
   currency: string;
   serviceName: string;
   resourceName: string;
@@ -98,11 +116,18 @@ const leadTimeLabel = (minutes: number) =>
 // Hold slotu na czas checkoutu (POST /api/v1/holds, TTL po stronie serwera)
 // ---------------------------------------------------------------------------
 
-/** Rozstrzygnięty wynik żądania blokady (stany przejściowe wyprowadzamy). */
+/**
+ * Rozstrzygnięty wynik żądania blokady (stany przejściowe wyprowadzamy).
+ * Trzymamy KOD, nie przetłumaczony komunikat: treść tłumaczymy przy
+ * renderze, więc translator nie jest zależnością efektu — przełączenie
+ * języka w kroku „dane" nie zwalnia i nie zakłada blokady od nowa
+ * (w oknie między DELETE a POST slot mógłby przejąć inny klient,
+ * a licznik TTL resetowałby się do pełnych 10 minut).
+ */
 type HoldOutcome =
   | { kind: "active"; token: string; expiresAt: number }
-  | { kind: "conflict"; message: string }
-  | { kind: "error"; message: string };
+  | { kind: "conflict" }
+  | { kind: "error" };
 
 type HoldResponse = {
   hold?: { token: string; expiresAt: string; ttlMinutes: number };
@@ -143,6 +168,7 @@ function useSlotHold(options: {
   startAtIso: string | null;
 }): SlotHold {
   const { enabled, businessSlug, serviceId, resourceId, startAtIso } = options;
+  const { t } = useTranslations();
   const slotKey = enabled && startAtIso ? `${startAtIso}|${resourceId}` : null;
 
   // Wynik jest przypięty do klucza slotu — zmiana slotu unieważnia go bez
@@ -218,36 +244,13 @@ function useSlotHold(options: {
         }
         if (abandoned) return;
         if (response.status === 409) {
-          setResult({
-            key: slotKey,
-            outcome: {
-              kind: "conflict",
-              message:
-                json?.message ??
-                "Ten termin właśnie został zajęty. Wybierz inną godzinę.",
-            },
-          });
+          setResult({ key: slotKey, outcome: { kind: "conflict" } });
           return;
         }
-        setResult({
-          key: slotKey,
-          outcome: {
-            kind: "error",
-            message:
-              json?.message ??
-              "Nie udało się zablokować terminu — możesz rezerwować dalej.",
-          },
-        });
+        setResult({ key: slotKey, outcome: { kind: "error" } });
       } catch {
         if (abandoned) return;
-        setResult({
-          key: slotKey,
-          outcome: {
-            kind: "error",
-            message:
-              "Nie udało się zablokować terminu — możesz rezerwować dalej.",
-          },
-        });
+        setResult({ key: slotKey, outcome: { kind: "error" } });
       }
     });
 
@@ -294,10 +297,14 @@ function useSlotHold(options: {
     token: status === "active" && outcome?.kind === "active"
       ? outcome.token
       : null,
+    // Komunikaty z API są zawsze polskie — treść bierzemy ze słownika,
+    // tłumacząc kod wyniku dopiero tutaj (przy renderze).
     message:
-      outcome && (outcome.kind === "conflict" || outcome.kind === "error")
-        ? outcome.message
-        : null,
+      outcome?.kind === "conflict"
+        ? t("bf.holdConflict")
+        : outcome?.kind === "error"
+          ? t("bf.holdError")
+          : null,
     release,
   };
 }
@@ -314,11 +321,15 @@ function useAvailability(
   const requestKey = date
     ? `${slug}|${serviceId}|${date}|${resourceId ?? ""}|${reloadKey}`
     : null;
+  const { t } = useTranslations();
+  // W stanie trzymamy flagę błędu, nie przetłumaczony komunikat — translator
+  // nie jest zależnością efektu, więc zmiana języka nie wymusza refetchu
+  // (tłumaczenie dzieje się przy renderze).
   const [state, setState] = useState<{
     key: string | null;
     data: AvailabilityResponse | null;
-    error: string | null;
-  }>({ key: null, data: null, error: null });
+    error: boolean;
+  }>({ key: null, data: null, error: false });
 
   useEffect(() => {
     if (!requestKey || !date) return;
@@ -332,14 +343,10 @@ function useAvailability(
         if (!response.ok) throw new Error("availability");
         return (await response.json()) as AvailabilityResponse;
       })
-      .then((data) => setState({ key: requestKey, data, error: null }))
+      .then((data) => setState({ key: requestKey, data, error: false }))
       .catch(() => {
         if (controller.signal.aborted) return;
-        setState({
-          key: requestKey,
-          data: null,
-          error: "Nie udało się pobrać terminów. Spróbuj ponownie.",
-        });
+        setState({ key: requestKey, data: null, error: true });
       });
     return () => controller.abort();
   }, [slug, serviceId, date, resourceId, requestKey]);
@@ -348,16 +355,17 @@ function useAvailability(
   return {
     loading: requestKey !== null && !isCurrent,
     data: isCurrent ? state.data : null,
-    error: isCurrent ? state.error : null,
+    error: isCurrent && state.error ? t("bf.errorSlots") : null,
   };
 }
 
 function BackCircle({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslations();
   return (
     <button
       type="button"
       onClick={onClick}
-      aria-label="Wstecz"
+      aria-label={t("common.back")}
       className="mb-4 flex size-[34px] items-center justify-center rounded-full border-[1.5px] border-border-strong bg-card text-sm"
     >
       ←
@@ -368,6 +376,7 @@ function BackCircle({ onClick }: { onClick: () => void }) {
 export function BookingFlow({ data }: { data: BookingFlowData }) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { locale, t } = useTranslations();
 
   const resourceParam = searchParams.get("resourceId");
   const dateParam = searchParams.get("date");
@@ -384,6 +393,9 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
 
   const [booking, setBooking] = useState<BookingResult | null>(null);
   const [payment, setPayment] = useState<BookingPayment | null>(null);
+  // Rabat żyje na poziomie flow — sticky podsumowanie po prawej pokazuje
+  // tę samą kwotę co krok „dane".
+  const [discount, setDiscount] = useState<AppliedDiscount | null>(null);
 
   // Dane gościa trzymamy na poziomie flow: komunikat konfliktu obiecuje
   // „Twoje dane zostają", a powrót do listy terminów odmontowuje krok „dane".
@@ -434,12 +446,12 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
       const date = new Date(startSerial + index * 86_400_000);
       return {
         iso: `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`,
-        weekday: WEEKDAYS_SHORT[(date.getUTCDay() + 6) % 7],
+        weekday: weekdaysShort(locale)[(date.getUTCDay() + 6) % 7],
         dayNumber: date.getUTCDate(),
         isToday: index === 0,
       };
     });
-  }, [data.timezone]);
+  }, [data.timezone, locale]);
 
   const todayIso = days[0].iso;
 
@@ -448,7 +460,7 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
       ? (data.resources.find((resource) => resource.id === resourceParam) ??
         null)
       : null;
-  const staffLabel = chosenResource?.name ?? "Dowolny pracownik";
+  const staffLabel = chosenResource?.name ?? t("bf.anyStaff");
   const effectiveDurationMin =
     chosenResource?.durationMinOverride ?? data.service.durationMin;
   const effectivePriceCents =
@@ -457,6 +469,7 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
     effectivePriceCents,
     data.service.priceType,
     data.service.currency,
+    locale,
   );
 
   // Hold żyje na poziomie flow, nie kroku — przetrwa re-render przy zmianie
@@ -471,6 +484,9 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
 
   const backToSlots = () => {
     setSlotsRefreshKey((key) => key + 1);
+    // Zmiana terminu/pracownika może zmienić cenę, a rabat liczy się od niej —
+    // porzucamy podgląd, żeby nie pokazywać kwoty sprzed zmiany.
+    setDiscount(null);
     setParams({ krok: "termin", time: null });
   };
 
@@ -489,20 +505,20 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
         ) : (
           <div className="mx-auto max-w-md py-16 text-center">
             <h1 className="mb-2 font-display text-[27px] font-extrabold tracking-tight">
-              Rezerwacja potwierdzona
+              {t("bf.confirmedTitle")}
             </h1>
             <p className="mb-6 text-[13px] text-muted-foreground">
               {depositReturn === "oplacony"
-                ? "Zadatek opłacony — dziękujemy. Szczegóły wizyty znajdziesz w e-mailu z potwierdzeniem."
+                ? t("bf.depositPaidInfo")
                 : depositReturn === "anulowany"
-                  ? "Płatność zadatku została przerwana — sama wizyta jest zarezerwowana. Link do zapłaty znajdziesz w e-mailu z potwierdzeniem; zadatek możesz też uregulować na miejscu."
-                  : "Szczegóły wizyty znajdziesz w e-mailu z potwierdzeniem."}
+                  ? t("bf.depositAbortedInfo")
+                  : t("bf.checkEmail")}
             </p>
             <Link
               href={`/b/${data.businessSlug}`}
               className="inline-block rounded-full bg-primary px-4 py-2 text-[13px] font-semibold text-primary-foreground"
             >
-              Wróć do profilu
+              {t("bf.backToProfile")}
             </Link>
           </div>
         )
@@ -553,9 +569,12 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
                 hold={hold}
                 guest={guest}
                 onGuestChange={updateGuest}
+                discount={discount}
+                onDiscountChange={setDiscount}
                 onBack={() => {
                   // Porzucenie kroku danych zwalnia slot, zanim wrócimy
                   // po świeżą listę godzin.
+                  setDiscount(null);
                   void hold.release().finally(() => router.back());
                 }}
                 onConflictRetry={backToSlots}
@@ -576,12 +595,13 @@ export function BookingFlow({ data }: { data: BookingFlowData }) {
             staffLabel={resourceParam ? staffLabel : null}
             termLabel={
               timeParam
-                ? formatDateTimeLabel(new Date(timeParam), data.timezone)
+                ? formatDateTimeLabel(new Date(timeParam), data.timezone, locale)
                 : null
             }
             priceLabelText={effectivePriceLabel}
             deposit={data.deposit}
             currency={data.service.currency}
+            discount={discount}
           />
         </div>
       )}
@@ -603,6 +623,7 @@ function BookingSummary({
   priceLabelText,
   deposit,
   currency,
+  discount,
 }: {
   businessName: string;
   address: string;
@@ -613,11 +634,13 @@ function BookingSummary({
   priceLabelText: string;
   deposit: BookingFlowData["deposit"];
   currency: string;
+  discount: AppliedDiscount | null;
 }) {
+  const { locale, t } = useTranslations();
   return (
     <aside className="hidden lg:sticky lg:top-8 lg:block">
       <div className="rounded-2xl border-[1.5px] border-border-strong bg-card p-5">
-        <div className="meta-label">Podsumowanie</div>
+        <div className="meta-label">{t("bf.summary")}</div>
         <div className="mt-1 font-display text-lg font-bold tracking-tight">
           {businessName}
         </div>
@@ -627,23 +650,27 @@ function BookingSummary({
 
         <dl className="flex flex-col gap-2.5 text-[13px]">
           <div className="flex justify-between gap-3">
-            <dt className="flex-none text-muted-foreground">Usługa</dt>
+            <dt className="flex-none text-muted-foreground">
+              {t("bf.service")}
+            </dt>
             <dd className="text-right font-semibold">{serviceName}</dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="flex-none text-muted-foreground">Pracownik</dt>
+            <dt className="flex-none text-muted-foreground">{t("bf.staff")}</dt>
             <dd className="text-right font-semibold">
               {staffLabel ?? <span className="text-[#8f8b81]">—</span>}
             </dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="flex-none text-muted-foreground">Termin</dt>
+            <dt className="flex-none text-muted-foreground">{t("bf.term")}</dt>
             <dd className="text-right font-mono font-medium">
               {termLabel ?? <span className="text-[#8f8b81]">—</span>}
             </dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="flex-none text-muted-foreground">Czas trwania</dt>
+            <dt className="flex-none text-muted-foreground">
+              {t("bf.duration")}
+            </dt>
             <dd className="text-right font-mono">
               {formatDuration(durationMin)}
             </dd>
@@ -652,23 +679,55 @@ function BookingSummary({
 
         <div className="my-4 h-px bg-border" />
 
-        <div className="flex items-baseline justify-between">
-          <span className="text-[13px] font-semibold">Cena</span>
-          <span className="font-mono text-base font-medium">
-            {priceLabelText}
-          </span>
-        </div>
+        {discount ? (
+          <>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-[13px] text-muted-foreground">
+                {t("bf.price")}
+              </span>
+              <span className="font-mono text-[13px] text-muted-foreground line-through">
+                {formatPrice(discount.subtotalCents, currency, locale)}
+              </span>
+            </div>
+            <div className="mt-1.5 flex items-baseline justify-between gap-3">
+              <span className="text-[13px] text-muted-foreground">
+                {t("bf.discount")}
+                <span className="ml-1.5 font-mono text-[11px] tracking-wider text-[#8f8b81]">
+                  {discount.code}
+                </span>
+              </span>
+              <span className="font-mono text-[13px] font-medium text-success">
+                −{formatPrice(discount.discountCents, currency, locale)}
+              </span>
+            </div>
+            <div className="mt-2 flex items-baseline justify-between gap-3">
+              <span className="text-[13px] font-semibold">{t("bf.toPay")}</span>
+              <span className="font-mono text-base font-medium">
+                {formatPrice(discount.totalCents, currency, locale)}
+              </span>
+            </div>
+          </>
+        ) : (
+          <div className="flex items-baseline justify-between">
+            <span className="text-[13px] font-semibold">{t("bf.price")}</span>
+            <span className="font-mono text-base font-medium">
+              {priceLabelText}
+            </span>
+          </div>
+        )}
 
         {deposit ? (
           <div className="mt-2 flex items-baseline justify-between gap-3">
             <span className="text-[13px] text-muted-foreground">
-              Zadatek
+              {t("bf.deposit")}
               <span className="block text-[11px] text-[#8f8b81]">
-                {deposit.stripeEnabled ? "płatny online" : "płatny na miejscu"}
+                {deposit.stripeEnabled
+                  ? t("bf.depositOnline")
+                  : t("bf.depositOnsite")}
               </span>
             </span>
             <span className="font-mono text-[13px] font-medium">
-              {formatPrice(deposit.amountCents, currency)}
+              {formatPrice(deposit.amountCents, currency, locale)}
             </span>
           </div>
         ) : null}
@@ -692,6 +751,7 @@ function StaffStep({
   onBack: () => void;
   onPick: (resourceId: string) => void;
 }) {
+  const { locale, t, tp } = useTranslations();
   const today = useAvailability(
     data.businessSlug,
     data.service.id,
@@ -710,9 +770,9 @@ function StaffStep({
   return (
     <div>
       <BackCircle onClick={onBack} />
-      <div className="meta-label">Krok 1 / 3 · Pracownik</div>
+      <div className="meta-label">{t("bf.step1")}</div>
       <h1 className="mt-1.5 mb-1 font-display text-[29px] font-extrabold tracking-tight">
-        Kto ma to zrobić?
+        {t("bf.whoTitle")}
       </h1>
       <div className="mb-5 text-[13px] text-muted-foreground">
         {data.service.name} · {formatDuration(data.service.durationMin)} ·{" "}
@@ -720,6 +780,7 @@ function StaffStep({
           data.service.priceCents,
           data.service.priceType,
           data.service.currency,
+          locale,
         )}
       </div>
 
@@ -731,10 +792,10 @@ function StaffStep({
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="font-display text-lg font-bold tracking-tight">
-              Dowolny pracownik
+              {t("bf.anyStaff")}
             </div>
             <div className="mt-[3px] text-xs text-primary-foreground/70">
-              Scalona dostępność całego zespołu
+              {t("bf.mergedAvailability")}
             </div>
           </div>
           <div className="flex-none text-right">
@@ -742,7 +803,7 @@ function StaffStep({
               {today.loading ? "…" : mergedToday.length}
             </div>
             <div className="text-[10px] text-primary-foreground/70">
-              terminów dziś
+              {t("bf.slotsTodayLabel")}
             </div>
           </div>
         </div>
@@ -773,7 +834,7 @@ function StaffStep({
             const delta = resource.priceCentsOverride - data.service.priceCents;
             if (delta !== 0) {
               extras.push(
-                `${delta > 0 ? "+" : "−"}${formatPrice(Math.abs(delta), data.service.currency)}`,
+                `${delta > 0 ? "+" : "−"}${formatPrice(Math.abs(delta), data.service.currency, locale)}`,
               );
             }
           }
@@ -798,18 +859,17 @@ function StaffStep({
                   <Skeleton className="mt-1.5 h-3.5 w-32" />
                 ) : slots.length > 0 ? (
                   <div className="mt-[5px] font-mono text-[11px] font-medium text-success">
-                    Dziś od{" "}
-                    {formatTimeInZone(new Date(slots[0].startAt), data.timezone)}{" "}
-                    · {slots.length}{" "}
-                    {slots.length === 1
-                      ? "termin"
-                      : slots.length < 5
-                        ? "terminy"
-                        : "terminów"}
+                    {t("bf.todayFrom", {
+                      time: formatTimeInZone(
+                        new Date(slots[0].startAt),
+                        data.timezone,
+                      ),
+                      slots: tp("plural.slots", slots.length),
+                    })}
                   </div>
                 ) : (
                   <div className="mt-[5px] font-mono text-[11px] font-medium text-warning">
-                    Brak terminów dziś
+                    {t("bf.noSlotsToday")}
                   </div>
                 )}
               </div>
@@ -820,8 +880,7 @@ function StaffStep({
       </div>
 
       <p className="mt-[18px] text-xs leading-relaxed text-muted-foreground">
-        Wybór „dowolny” daje najwięcej terminów — pracownika przypisujemy przy
-        potwierdzeniu i pokazujemy go w e-mailu.
+        {t("bf.anyHint")}
       </p>
     </div>
   );
@@ -855,6 +914,7 @@ function DateStep({
   onPickDay: (iso: string) => void;
   onPickSlot: (startAtIso: string) => void;
 }) {
+  const { locale, t } = useTranslations();
   const [reloadKey, setReloadKey] = useState(0);
   const availability = useAvailability(
     data.businessSlug,
@@ -944,26 +1004,23 @@ function DateStep({
       else wieczorem.push(slot);
     }
     return [
-      { label: "Rano", slots: rano },
-      { label: "Po południu", slots: popoludniu },
-      { label: "Wieczorem", slots: wieczorem },
+      { key: "bf.morning" as const, slots: rano },
+      { key: "bf.afternoon" as const, slots: popoludniu },
+      { key: "bf.evening" as const, slots: wieczorem },
     ].filter((group) => group.slots.length > 0);
   }, [availability.data, data.timezone]);
 
   const selectedDay = days.find((day) => day.iso === selectedDate);
   const selectedDayLabel = selectedDay
-    ? formatDayFull(
-        new Date(`${selectedDate}T12:00:00Z`),
-        "UTC",
-      )
+    ? formatDayFull(new Date(`${selectedDate}T12:00:00Z`), "UTC", locale)
     : "";
 
   return (
     <div>
       <BackCircle onClick={onBack} />
-      <div className="meta-label">Krok 2 / 3 · Termin</div>
+      <div className="meta-label">{t("bf.step2")}</div>
       <h1 className="mt-1.5 mb-1 font-display text-[29px] font-extrabold tracking-tight">
-        Kiedy pasuje?
+        {t("bf.whenTitle")}
       </h1>
       <div className="mb-1 text-[13px] text-muted-foreground">
         {data.service.name} · {staffLabel} · {formatDuration(durationMin)}
@@ -990,7 +1047,7 @@ function DateStep({
                     : "text-[11px] text-[#8f8b81]"
                 }
               >
-                {day.isToday ? "dziś" : day.weekday}
+                {day.isToday ? t("common.today") : day.weekday}
               </div>
               <div className="mt-0.5 font-mono text-[17px] font-medium">
                 {day.dayNumber}
@@ -1004,7 +1061,7 @@ function DateStep({
         <div className="mb-2.5 flex items-center justify-between">
           <div className="meta-label">{selectedDayLabel}</div>
           <div className="font-mono text-[10px] text-[#8f8b81]">
-            siatka {data.slotGranularityMin} min
+            {t("bf.grid", { min: data.slotGranularityMin })}
           </div>
         </div>
 
@@ -1024,13 +1081,13 @@ function DateStep({
               onClick={() => setReloadKey((key) => key + 1)}
               className="rounded-full border-[1.5px] border-border-strong bg-card px-4 py-2 text-[13px] font-semibold"
             >
-              Spróbuj ponownie
+              {t("common.retry")}
             </button>
           </div>
         ) : groups.length === 0 ? (
           <div className="mx-auto mt-3 max-w-md">
             <h2 className="mb-3.5 font-display text-xl font-extrabold tracking-tight">
-              Brak wolnych godzin
+              {t("bf.noFreeHours")}
             </h2>
             {nearest ? (
               <button
@@ -1040,11 +1097,13 @@ function DateStep({
               >
                 <div>
                   <div className="text-[12.5px] font-bold">
-                    Najbliżej:{" "}
-                    {formatDayShort(
-                      new Date(`${nearest.iso}T12:00:00Z`),
-                      "UTC",
-                    )}
+                    {t("bf.nearest", {
+                      day: formatDayShort(
+                        new Date(`${nearest.iso}T12:00:00Z`),
+                        "UTC",
+                        locale,
+                      ),
+                    })}
                   </div>
                   <div className="text-[11px] text-muted-foreground">
                     {nearest.firstSlots.join(", ")}
@@ -1054,15 +1113,16 @@ function DateStep({
               </button>
             ) : (
               <p className="text-[13px] text-muted-foreground">
-                Sprawdź inny dzień na pasku powyżej — w najbliższym tygodniu
-                nie widzimy wolnych godzin.
+                {t("bf.noneNextWeek")}
               </p>
             )}
           </div>
         ) : (
           groups.map((group) => (
-            <div key={group.label}>
-              <div className="mt-3.5 mb-2 text-xs font-bold">{group.label}</div>
+            <div key={group.key}>
+              <div className="mt-3.5 mb-2 text-xs font-bold">
+                {t(group.key)}
+              </div>
               <div className="grid grid-cols-3 gap-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
                 {group.slots.map((slot) => (
                   <button
@@ -1080,9 +1140,10 @@ function DateStep({
         )}
 
         <p className="mt-[18px] text-[11px] leading-relaxed text-[#8f8b81]">
-          Godziny w strefie lokalu ({data.timezone}). Pokazujemy wyłącznie
-          wolne terminy — min. wyprzedzenie {leadTimeLabel(data.minLeadTimeMin)}
-          .
+          {t("bf.tzNote", {
+            tz: data.timezone,
+            lead: leadTimeLabel(data.minLeadTimeMin),
+          })}
         </p>
       </div>
     </div>
@@ -1103,6 +1164,8 @@ function DetailsStep({
   hold,
   guest,
   onGuestChange,
+  discount,
+  onDiscountChange,
   onBack,
   onConflictRetry,
   onSuccess,
@@ -1117,10 +1180,13 @@ function DetailsStep({
   /** Dane gościa żyją w BookingFlow — przetrwają powrót do listy terminów. */
   guest: GuestDetails;
   onGuestChange: (patch: Partial<GuestDetails>) => void;
+  discount: AppliedDiscount | null;
+  onDiscountChange: (next: AppliedDiscount | null) => void;
   onBack: () => void;
   onConflictRetry: () => void;
   onSuccess: (booking: BookingResult, payment: BookingPayment | null) => void;
 }) {
+  const { locale, t } = useTranslations();
   const { name, phone, email } = guest;
   const setName = (value: string) => onGuestChange({ name: value });
   const setPhone = (value: string) => onGuestChange({ phone: value });
@@ -1128,6 +1194,47 @@ function DetailsStep({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<string | null>(null);
+  const [codeInput, setCodeInput] = useState("");
+  const [codeError, setCodeError] = useState<string | null>(null);
+  const [codePending, setCodePending] = useState(false);
+
+  // Rabat ma sens tylko przy konkretnej kwocie — usługa „bezpłatna" albo
+  // „na zapytanie" nie ma od czego liczyć zniżki.
+  const priceKnown =
+    data.service.priceType !== "FREE" && data.service.priceType !== "ON_REQUEST";
+
+  const applyCode = async () => {
+    const entered = codeInput.trim();
+    if (entered === "") return;
+    setCodeError(null);
+    setCodePending(true);
+    try {
+      const result = await previewDiscountAction({
+        businessSlug: data.businessSlug,
+        serviceId: data.service.id,
+        resourceId: resourceId === "any" ? undefined : resourceId,
+        code: entered,
+        guestEmail: email.trim() || undefined,
+        guestPhone: phone.trim() || undefined,
+      });
+      if (result.ok) {
+        onDiscountChange({
+          code: result.code,
+          discountCents: result.discountCents,
+          subtotalCents: result.subtotalCents,
+          totalCents: result.totalCents,
+        });
+        setCodeInput("");
+      } else {
+        onDiscountChange(null);
+        setCodeError(result.error);
+      }
+    } catch {
+      setCodeError(t("bf.codeCheckFailed"));
+    } finally {
+      setCodePending(false);
+    }
+  };
 
   const startAt = new Date(startAtIso);
   const isGuest = !data.user;
@@ -1143,15 +1250,15 @@ function DetailsStep({
     setConflict(null);
     if (isGuest) {
       if (name.trim().length < 2) {
-        setError("Podaj imię i nazwisko.");
+        setError(t("form.errName"));
         return;
       }
       if (!/^\S+@\S+\.\S+$/.test(email.trim())) {
-        setError("Podaj poprawny adres e-mail.");
+        setError(t("form.errEmail"));
         return;
       }
       if (phone.trim().length < 7) {
-        setError("Podaj poprawny numer telefonu.");
+        setError(t("form.errPhone"));
         return;
       }
     }
@@ -1169,11 +1276,13 @@ function DetailsStep({
           guest: isGuest
             ? { name: name.trim(), email: email.trim(), phone: phone.trim() }
             : undefined,
+          discountCode: discount?.code,
         }),
       });
       const json = (await response.json().catch(() => null)) as {
         booking?: BookingResult;
         payment?: BookingPayment | null;
+        error?: string;
         message?: string;
       } | null;
 
@@ -1181,18 +1290,22 @@ function DetailsStep({
         onSuccess(json.booking, json.payment ?? null);
         return;
       }
-      if (response.status === 409) {
-        setConflict(
-          json?.message ??
-            "Ten termin właśnie został zajęty. Wybierz inną godzinę.",
-        );
+      // Kod przestał działać między podglądem a potwierdzeniem (limit,
+      // wygaśnięcie) — zdejmujemy go i zostawiamy klienta przy rezerwacji.
+      // Komunikaty z API są zawsze polskie — treść bierzemy ze słownika.
+      if (json?.error === "DISCOUNT_INVALID") {
+        onDiscountChange(null);
+        setCodeError(t("bf.codeStopped"));
+        setError(t("bf.codeStoppedRecheck"));
         return;
       }
-      setError(
-        json?.message ?? "Nie udało się utworzyć rezerwacji. Spróbuj ponownie.",
-      );
+      if (response.status === 409) {
+        setConflict(t("bf.conflict409"));
+        return;
+      }
+      setError(t("bf.createFailed"));
     } catch {
-      setError("Błąd połączenia. Sprawdź internet i spróbuj ponownie.");
+      setError(t("common.connectionError"));
     } finally {
       setSubmitting(false);
     }
@@ -1204,9 +1317,9 @@ function DetailsStep({
   return (
     <div>
       <BackCircle onClick={onBack} />
-      <div className="meta-label">Krok 3 / 3 · Dane</div>
+      <div className="meta-label">{t("bf.step3")}</div>
       <h1 className="mt-1.5 mb-[18px] font-display text-[29px] font-extrabold tracking-tight">
-        Prawie gotowe.
+        {t("bf.almostDone")}
       </h1>
 
       {activeConflict ? (
@@ -1215,17 +1328,19 @@ function DetailsStep({
             !
           </div>
           <div className="mb-1.5 font-display text-[21px] leading-tight font-extrabold tracking-tight">
-            Termin {formatTimeInZone(startAt, data.timezone)} przepadł
+            {t("bf.slotTaken", {
+              time: formatTimeInZone(startAt, data.timezone),
+            })}
           </div>
           <p className="mb-3.5 text-[12.5px] leading-relaxed text-foreground/80">
-            {activeConflict} Twoje dane zostają — nie wpisujesz ich drugi raz.
+            {activeConflict} {t("bf.dataStays")}
           </p>
           <button
             type="button"
             onClick={onConflictRetry}
             className="w-full rounded-[10px] bg-primary p-3 text-[13px] font-bold text-primary-foreground"
           >
-            Pokaż wolne terminy
+            {t("bf.showFree")}
           </button>
         </div>
       ) : null}
@@ -1236,18 +1351,19 @@ function DetailsStep({
             ⏱
           </div>
           <div className="mb-1.5 font-display text-[21px] leading-tight font-extrabold tracking-tight">
-            Blokada terminu wygasła
+            {t("bf.holdExpiredTitle")}
           </div>
           <p className="mb-3.5 text-[12.5px] leading-relaxed text-foreground/80">
-            Godzinę {formatTimeInZone(startAt, data.timezone)} trzymaliśmy dla
-            Ciebie 10 minut. Wróć do listy — pokażemy odświeżoną dostępność.
+            {t("bf.holdExpiredText", {
+              time: formatTimeInZone(startAt, data.timezone),
+            })}
           </p>
           <button
             type="button"
             onClick={onConflictRetry}
             className="w-full rounded-[10px] bg-primary p-3 text-[13px] font-bold text-primary-foreground"
           >
-            Pokaż wolne terminy
+            {t("bf.showFree")}
           </button>
         </div>
       ) : null}
@@ -1255,11 +1371,11 @@ function DetailsStep({
       {!activeConflict && !holdExpired ? (
         <div className="mb-4 flex items-center justify-between gap-3 rounded-[14px] border border-border bg-accent px-3.5 py-2.5">
           <div className="min-w-0">
-            <div className="meta-label">Termin zablokowany dla Ciebie</div>
+            <div className="meta-label">{t("bf.holdLabel")}</div>
             <div className="mt-0.5 text-[11.5px] leading-snug text-muted-foreground">
               {hold.status === "error"
-                ? "Blokady nie udało się założyć — rezerwuj dalej, termin może zająć ktoś inny."
-                : "Dokończ dane, zanim skończy się czas."}
+                ? t("bf.holdErrorNote")
+                : t("bf.holdFinish")}
             </div>
           </div>
           <div
@@ -1284,20 +1400,20 @@ function DetailsStep({
         </div>
         <div className="my-[11px] h-px bg-[#e2ddd2] dark:bg-border" />
         <div className="flex justify-between text-[13px] text-foreground/80">
-          <span>Termin</span>
+          <span>{t("bf.term")}</span>
           <span className="font-mono font-medium text-foreground">
-            {formatDayShort(startAt, data.timezone)} ·{" "}
+            {formatDayShort(startAt, data.timezone, locale)} ·{" "}
             {formatTimeInZone(startAt, data.timezone)}
           </span>
         </div>
         <div className="mt-1.5 flex justify-between text-[13px] text-foreground/80">
-          <span>Pracownik</span>
+          <span>{t("bf.staff")}</span>
           <span className="font-semibold text-foreground">
-            {resourceId === "any" ? "Przypisany przy potwierdzeniu" : staffLabel}
+            {resourceId === "any" ? t("bf.assignedAtConfirm") : staffLabel}
           </span>
         </div>
         <div className="mt-1.5 flex justify-between text-[13px] text-foreground/80">
-          <span>Czas trwania</span>
+          <span>{t("bf.duration")}</span>
           <span className="font-mono text-foreground">
             {formatDuration(durationMin)}
           </span>
@@ -1307,17 +1423,115 @@ function DetailsStep({
             <div className="my-[11px] h-px bg-[#e2ddd2] dark:bg-border" />
             <div className="flex justify-between text-[13px] text-foreground/80">
               <span>
-                Zadatek
+                {t("bf.deposit")}
                 <span className="ml-1.5 text-[11px] text-[#8f8b81]">
                   {data.deposit.stripeEnabled
-                    ? "płatny online"
-                    : "płatny na miejscu"}
+                    ? t("bf.depositOnline")
+                    : t("bf.depositOnsite")}
                 </span>
               </span>
               <span className="font-mono font-medium text-foreground">
-                {formatPrice(data.deposit.amountCents, data.service.currency)}
+                {formatPrice(
+                  data.deposit.amountCents,
+                  data.service.currency,
+                  locale,
+                )}
               </span>
             </div>
+          </>
+        ) : null}
+
+        {priceKnown ? (
+          <>
+            <div className="my-[11px] h-px bg-[#e2ddd2] dark:bg-border" />
+            {discount ? (
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between gap-3 text-[13px]">
+                  <span className="min-w-0">
+                    {t("bf.discount")}
+                    <span className="ml-1.5 font-mono text-[11px] tracking-wider text-[#8f8b81]">
+                      {discount.code}
+                    </span>
+                  </span>
+                  <span className="flex-none font-mono font-medium text-success">
+                    −
+                    {formatPrice(
+                      discount.discountCents,
+                      data.service.currency,
+                      locale,
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[13px] font-bold">{t("bf.toPay")}</span>
+                  <span className="font-mono text-[17px] font-medium">
+                    {formatPrice(
+                      discount.totalCents,
+                      data.service.currency,
+                      locale,
+                    )}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onDiscountChange(null);
+                    setCodeError(null);
+                  }}
+                  className="self-start text-[11.5px] text-muted-foreground underline underline-offset-2"
+                >
+                  {t("bf.removeCode")}
+                </button>
+              </div>
+            ) : (
+              <div>
+                <label
+                  htmlFor="discount-code-input"
+                  className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
+                >
+                  {t("bf.haveCode")}
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    id="discount-code-input"
+                    value={codeInput}
+                    onChange={(event) => {
+                      setCodeInput(event.target.value);
+                      if (codeError) setCodeError(null);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void applyCode();
+                      }
+                    }}
+                    autoComplete="off"
+                    autoCapitalize="characters"
+                    placeholder={t("bf.codePlaceholder")}
+                    aria-invalid={codeError !== null}
+                    className={`${inputClass} min-w-0 flex-1 font-mono tracking-wider uppercase ${
+                      codeError ? "border-[1.5px] border-destructive" : ""
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void applyCode()}
+                    disabled={codePending || codeInput.trim() === ""}
+                    className="flex-none rounded-[11px] border-[1.5px] border-border-strong bg-card px-4 text-[13px] font-semibold disabled:opacity-50"
+                  >
+                    {codePending ? t("bf.checkingCode") : t("bf.apply")}
+                  </button>
+                </div>
+                {codeError ? (
+                  <p
+                    role="alert"
+                    className="mt-1.5 text-[12px] font-semibold text-destructive"
+                  >
+                    {codeError}
+                  </p>
+                ) : null}
+              </div>
+            )}
           </>
         ) : null}
       </div>
@@ -1329,7 +1543,7 @@ function DetailsStep({
               htmlFor="guest-name"
               className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
             >
-              Imię i nazwisko
+              {t("form.fullName")}
             </label>
             <input
               id="guest-name"
@@ -1344,9 +1558,9 @@ function DetailsStep({
               htmlFor="guest-phone"
               className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
             >
-              Telefon{" "}
+              {t("form.phone")}{" "}
               <span className="font-normal text-[#8f8b81]">
-                · na SMS z przypomnieniem
+                {t("form.phoneHintSms")}
               </span>
             </label>
             <input
@@ -1364,7 +1578,7 @@ function DetailsStep({
               htmlFor="guest-email"
               className="mb-[5px] block text-[11px] font-semibold text-muted-foreground"
             >
-              E-mail
+              {t("form.email")}
             </label>
             <input
               id="guest-email"
@@ -1379,9 +1593,9 @@ function DetailsStep({
         </div>
       ) : (
         <div className="rounded-2xl border border-border bg-card p-4">
-          <div className="meta-label mb-1.5">Rezerwujesz jako</div>
+          <div className="meta-label mb-1.5">{t("bf.bookingAs")}</div>
           <div className="text-sm font-semibold">
-            {data.user?.name ?? "Twoje konto"}
+            {data.user?.name ?? t("bf.yourAccount")}
           </div>
           {data.user?.email ? (
             <div className="mt-0.5 text-[13px] text-muted-foreground">
@@ -1392,10 +1606,13 @@ function DetailsStep({
       )}
 
       <div className="mt-5 rounded-[14px] border border-[#e2ddd2] bg-card p-[13px] dark:border-border">
-        <div className="mb-[7px] text-xs font-bold">Zasady odwołania</div>
+        <div className="mb-[7px] text-xs font-bold">
+          {t("profile.cancelPolicy")}
+        </div>
         <p className="text-[11.5px] leading-relaxed text-foreground/80">
-          Bezpłatnie do <b>{data.cancellationCutoffHours} h</b> przed wizytą.
-          Później termin przepada.
+          {t("profile.cancelPolicyText", {
+            hours: data.cancellationCutoffHours,
+          })}
         </p>
       </div>
 
@@ -1419,15 +1636,35 @@ function DetailsStep({
         className="mt-[18px] w-full rounded-[14px] bg-primary p-4 text-[15px] font-bold text-primary-foreground disabled:opacity-60"
       >
         {submitting
-          ? "Rezerwuję…"
-          : `Potwierdzam rezerwację · ${priceLabelText}`}
+          ? t("bf.submitting")
+          : t("bf.confirmCta", {
+              price: discount
+                ? formatPrice(
+                    discount.totalCents,
+                    data.service.currency,
+                    locale,
+                  )
+                : priceLabelText,
+            })}
       </button>
       <p className="mt-2 text-center text-[11px] text-[#8f8b81]">
         {data.deposit
           ? data.deposit.stripeEnabled
-            ? `Zadatek ${formatPrice(data.deposit.amountCents, data.service.currency)} zapłacisz online po potwierdzeniu. Reszta w lokalu.`
-            : `Zadatek ${formatPrice(data.deposit.amountCents, data.service.currency)} płatny na miejscu. Reszta w lokalu.`
-          : "Płatność w lokalu. Zadatku nie wymagamy."}
+            ? t("bf.depositPayOnline", {
+                amount: formatPrice(
+                  data.deposit.amountCents,
+                  data.service.currency,
+                  locale,
+                ),
+              })
+            : t("bf.depositPayOnsite", {
+                amount: formatPrice(
+                  data.deposit.amountCents,
+                  data.service.currency,
+                  locale,
+                ),
+              })
+          : t("bf.payInVenue")}
       </p>
     </div>
   );
@@ -1449,6 +1686,7 @@ function SuccessScreen({
   /** Status powrotu z bramki (searchParam `zadatek`), gdy klient stąd wracał. */
   depositReturn: "oplacony" | "anulowany" | null;
 }) {
+  const { locale, t } = useTranslations();
   const startAt = new Date(booking.startAt);
   const deadline = new Date(booking.cancellationDeadline);
   // Powrót z bramki jest świeższy niż status zapisany przy tworzeniu
@@ -1462,17 +1700,16 @@ function SuccessScreen({
         ✓
       </div>
       <h1 className="mb-2 font-display text-[32px] leading-none font-extrabold tracking-tight">
-        Zarezerwowane.
+        {t("bf.booked")}
       </h1>
       <p className="mb-[22px] text-sm leading-relaxed text-foreground/80">
-        Rezerwacja jest potwierdzona. Zapisz szczegóły — przypomnienie
-        wyślemy przed wizytą.
+        {t("bf.successNote")}
       </p>
 
       <div className="overflow-hidden rounded-2xl border-[1.5px] border-border-strong bg-card">
         <div className="border-b border-dashed border-[#d8d2c4] p-4 dark:border-border">
           <div className="meta-label">
-            {formatDayFull(startAt, booking.timezone)}
+            {formatDayFull(startAt, booking.timezone, locale)}
           </div>
           <div className="my-1 font-display text-[38px] font-extrabold tracking-tight">
             {formatTimeInZone(startAt, booking.timezone)}
@@ -1493,27 +1730,45 @@ function SuccessScreen({
               #{booking.id.slice(-8).toUpperCase()}
             </div>
           </div>
-          <div className="font-mono text-base font-medium">
-            {formatPrice(booking.priceCents, booking.currency)}
+          <div className="text-right">
+            {booking.discountCents && booking.subtotalCents ? (
+              <div className="font-mono text-[11px] text-[#8f8b81] line-through">
+                {formatPrice(booking.subtotalCents, booking.currency, locale)}
+              </div>
+            ) : null}
+            <div className="font-mono text-base font-medium">
+              {formatPrice(booking.priceCents, booking.currency, locale)}
+            </div>
+            {booking.discountCents ? (
+              <div className="font-mono text-[11px] font-medium text-success">
+                {t("bf.discountMinus", {
+                  amount: formatPrice(
+                    booking.discountCents,
+                    booking.currency,
+                    locale,
+                  ),
+                })}
+              </div>
+            ) : null}
           </div>
         </div>
         {payment ? (
           <div className="border-t border-dashed border-[#d8d2c4] px-4 py-3 dark:border-border">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="meta-label">Zadatek</div>
+                <div className="meta-label">{t("bf.deposit")}</div>
                 <div className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
                   {depositPaid
-                    ? "opłacony — dziękujemy"
+                    ? t("bf.depositPaidThanks")
                     : depositAborted
-                      ? "płatność przerwana — możesz spróbować ponownie"
+                      ? t("bf.depositAbortedRetry")
                       : payment.redirectUrl
-                        ? "do zapłaty online — dokończ płatność"
-                        : "do zapłaty na miejscu, przy wizycie"}
+                        ? t("bf.depositFinishOnline")
+                        : t("bf.depositOnsiteAtVisit")}
                 </div>
               </div>
               <div className="flex-none font-mono text-base font-medium">
-                {formatPrice(payment.amountCents, payment.currency)}
+                {formatPrice(payment.amountCents, payment.currency, locale)}
               </div>
             </div>
             {!depositPaid && payment.redirectUrl ? (
@@ -1521,8 +1776,10 @@ function SuccessScreen({
                 href={payment.redirectUrl}
                 className="mt-3 block w-full rounded-xl bg-primary py-3 text-center text-[13px] font-bold text-primary-foreground"
               >
-                {depositAborted ? "Ponów płatność zadatku · " : "Zapłać zadatek · "}
-                {formatPrice(payment.amountCents, payment.currency)}
+                {depositAborted
+                  ? `${t("bf.retryDeposit")} · `
+                  : `${t("bf.payDeposit")} · `}
+                {formatPrice(payment.amountCents, payment.currency, locale)}
               </a>
             ) : null}
           </div>
@@ -1534,29 +1791,30 @@ function SuccessScreen({
           type="button"
           className="flex-1 rounded-xl border-[1.5px] border-border-strong bg-card py-[13px] text-[13px] font-semibold"
         >
-          Dodaj do kalendarza
+          {t("bf.addToCalendar")}
         </button>
         <button
           type="button"
           className="flex-1 rounded-xl border-[1.5px] border-border-strong bg-card py-[13px] text-[13px] font-semibold"
         >
-          Nawiguj
+          {t("bf.navigate")}
         </button>
       </div>
       <Link
         href="/"
         className="mt-2 block w-full rounded-xl bg-primary p-[15px] text-center text-sm font-bold text-primary-foreground"
       >
-        Wróć do wyszukiwarki
+        {t("bf.backToSearch")}
       </Link>
       <p className="mt-4 text-center text-[11.5px] leading-relaxed text-[#8f8b81]">
-        Odwołanie bezpłatne do {booking.cancellationCutoffHours} h przed (do{" "}
-        {formatDayShort(deadline, booking.timezone)},{" "}
-        {formatTimeInZone(deadline, booking.timezone)}).
+        {t("bf.cancelFreeUntilFull", {
+          hours: booking.cancellationCutoffHours,
+          deadline: `${formatDayShort(deadline, booking.timezone, locale)}, ${formatTimeInZone(deadline, booking.timezone)}`,
+        })}
       </p>
       <p className="mt-1 text-center text-[11px] text-[#8f8b81]">
         <Link href={`/b/${slug}`} className="underline underline-offset-2">
-          Zobacz profil {booking.businessName}
+          {t("bf.seeProfile", { name: booking.businessName })}
         </Link>
       </p>
     </div>

@@ -18,6 +18,7 @@ import {
   PanelDialogContent,
 } from "@/components/panel/panel-dialog";
 import { FloorPlanGrid } from "@/components/panel/floor-plan-grid";
+import { runAction } from "@/components/panel/run-action";
 import {
   TableDialog,
   type TableEditorState,
@@ -28,12 +29,17 @@ import {
   GRID_MAX,
   GRID_MIN,
   SHAPE_LABELS,
+  SPAN_MAX,
+  SPAN_MIN,
   firstFreeCell,
   fitsInGrid,
   findCollision,
   type PlanRoom,
   type PlanTable,
 } from "@/app/panel/(dashboard)/sale/plan-utils";
+
+/** Górna granica pojemności stolika — lustro schematu Zod w sale/actions.ts. */
+const CAPACITY_MAX = 50;
 import {
   deleteRoomAction,
   deleteTableAction,
@@ -66,13 +72,14 @@ export function FloorPlanView({
   businessId,
   locationId,
   rooms,
-  unassignedCount,
+  unassignedTables,
   isManager,
 }: {
   businessId: string;
   locationId: string;
   rooms: PlanRoom[];
-  unassignedCount: number;
+  /** Stoliki bez sali — nie renderują się na żadnym planie, ale istnieją. */
+  unassignedTables: PlanTable[];
   isManager: boolean;
 }) {
   const router = useRouter();
@@ -139,14 +146,16 @@ export function FloorPlanView({
       return;
     }
     startTransition(async () => {
-      const result = await saveRoomAction({
-        businessId,
-        locationId,
-        roomId: roomEditor.roomId ?? undefined,
-        name: roomEditor.name.trim(),
-        gridWidth,
-        gridHeight,
-      });
+      const result = await runAction(() =>
+        saveRoomAction({
+          businessId,
+          locationId,
+          roomId: roomEditor.roomId ?? undefined,
+          name: roomEditor.name.trim(),
+          gridWidth,
+          gridHeight,
+        }),
+      );
       if (result.ok) {
         toast.success(roomEditor.roomId ? "Zapisano salę" : "Sala dodana");
         setRoomEditor(null);
@@ -160,10 +169,9 @@ export function FloorPlanView({
   const removeRoom = () => {
     if (!roomEditor?.roomId) return;
     startTransition(async () => {
-      const result = await deleteRoomAction({
-        businessId,
-        roomId: roomEditor.roomId!,
-      });
+      const result = await runAction(() =>
+        deleteRoomAction({ businessId, roomId: roomEditor.roomId! }),
+      );
       if (result.ok) {
         toast.success("Sala usunięta");
         setRoomEditor(null);
@@ -234,6 +242,9 @@ export function FloorPlanView({
     const spanX = numberOrNaN(tableEditor.spanX);
     const spanY = numberOrNaN(tableEditor.spanY);
 
+    // Te same granice co w schemacie Zod na serwerze — atrybut `max` na
+    // <Input type="number"> niczego nie blokuje, bo zapis idzie z onClick,
+    // a nie z submitu formularza.
     if (
       !Number.isFinite(capacityMin) ||
       !Number.isFinite(capacityMax) ||
@@ -243,6 +254,10 @@ export function FloorPlanView({
       toast.error("Pojemność: minimum 1 osoba, a „do” nie mniej niż „od”");
       return;
     }
+    if (capacityMax > CAPACITY_MAX) {
+      toast.error(`Pojemność: maksymalnie ${CAPACITY_MAX} osób przy stoliku`);
+      return;
+    }
     if (
       !Number.isFinite(posX) ||
       !Number.isFinite(posY) ||
@@ -250,6 +265,15 @@ export function FloorPlanView({
       !Number.isFinite(spanY)
     ) {
       toast.error("Podaj pozycję i rozmiar kafla");
+      return;
+    }
+    if (
+      spanX < SPAN_MIN ||
+      spanY < SPAN_MIN ||
+      spanX > SPAN_MAX ||
+      spanY > SPAN_MAX
+    ) {
+      toast.error(`Rozmiar kafla: od ${SPAN_MIN} do ${SPAN_MAX} komórek`);
       return;
     }
 
@@ -277,23 +301,25 @@ export function FloorPlanView({
     }
 
     startTransition(async () => {
-      const result = await saveTableAction({
-        businessId,
-        locationId,
-        tableId: tableEditor.tableId ?? undefined,
-        roomId: tableEditor.roomId,
-        tableNumber: tableEditor.tableNumber.trim(),
-        capacityMin,
-        capacityMax,
-        shape: tableEditor.shape,
-        area: tableEditor.area,
-        combinable: tableEditor.combinable,
-        isActive: tableEditor.isActive,
-        posX,
-        posY,
-        spanX,
-        spanY,
-      });
+      const result = await runAction(() =>
+        saveTableAction({
+          businessId,
+          locationId,
+          tableId: tableEditor.tableId ?? undefined,
+          roomId: tableEditor.roomId,
+          tableNumber: tableEditor.tableNumber.trim(),
+          capacityMin,
+          capacityMax,
+          shape: tableEditor.shape,
+          area: tableEditor.area,
+          combinable: tableEditor.combinable,
+          isActive: tableEditor.isActive,
+          posX,
+          posY,
+          spanX,
+          spanY,
+        }),
+      );
       if (result.ok) {
         toast.success(tableEditor.tableId ? "Zapisano stolik" : "Stolik dodany");
         setTableEditor(null);
@@ -309,13 +335,12 @@ export function FloorPlanView({
   const removeTable = () => {
     if (!tableEditor?.tableId) return;
     startTransition(async () => {
-      const result = await deleteTableAction({
-        businessId,
-        tableId: tableEditor.tableId!,
-      });
+      const result = await runAction(() =>
+        deleteTableAction({ businessId, tableId: tableEditor.tableId! }),
+      );
       if (result.ok) {
         toast.success(
-          result.deactivated
+          "deactivated" in result && result.deactivated
             ? "Stolik ma rezerwacje w historii — został wyłączony"
             : "Stolik usunięty",
         );
@@ -331,12 +356,10 @@ export function FloorPlanView({
     setOverrides((prev) => ({ ...prev, [table.id]: { posX, posY } }));
     setMovingId(table.id);
     startTransition(async () => {
-      const result = await moveTableAction({
-        businessId,
-        tableId: table.id,
-        posX,
-        posY,
-      });
+      const result = await runAction(() =>
+        moveTableAction({ businessId, tableId: table.id, posX, posY }),
+      );
+      // Zawsze — także po błędzie sieci — inaczej kafel pulsuje bez końca.
       setMovingId(null);
       if (result.ok) {
         toast.success(
@@ -356,11 +379,35 @@ export function FloorPlanView({
 
   return (
     <div className="flex flex-col gap-4">
-      {unassignedCount > 0 && (
-        <p className="rounded-xl border border-warning bg-warning-soft px-3.5 py-2.5 text-[12.5px] text-warning-strong">
-          {unassignedCount} stolik(ów) nie ma przypisanej sali — nie widać ich na
-          żadnym planie ani w rezerwacjach online.
-        </p>
+      {unassignedTables.length > 0 && (
+        <div className="rounded-xl border border-warning bg-warning-soft px-3.5 py-2.5 text-[12.5px] text-warning-strong">
+          <p>
+            {unassignedTables.length} stolik(ów) nie ma przypisanej sali — nie
+            widać ich na żadnym planie ani w rezerwacjach online.
+            {isManager
+              ? " Otwórz stolik i wskaż salę, żeby wrócił na plan."
+              : ""}
+          </p>
+          {/* Baner musi prowadzić do naprawy: osierocony stolik nie renderuje
+              się na żadnym planie ani na liście sali, więc bez tej sekcji nie
+              da się go w ogóle otworzyć w dialogu. */}
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {unassignedTables.map((table) => (
+              <button
+                key={table.id}
+                type="button"
+                disabled={!isManager}
+                onClick={() => openTable(table)}
+                className="flex min-h-11 items-center gap-1.5 rounded-full border border-warning bg-card px-3 font-mono text-[11.5px] font-semibold text-foreground disabled:opacity-60 lg:min-h-8"
+              >
+                {table.tableNumber}
+                <span className="text-muted-foreground">
+                  {table.capacityMin}–{table.capacityMax} os.
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
       )}
 
       <div className="grid gap-4 lg:grid-cols-[290px_minmax(0,1fr)]">

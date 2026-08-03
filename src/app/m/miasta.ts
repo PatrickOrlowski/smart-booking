@@ -66,9 +66,12 @@ const LOCATIVE: Record<string, string> = {
  * miejscowości jest nieregularna (Sanok → Sanoku, Kraków → Krakowie),
  * więc zamiast zgadywać końcówkę używamy formy z rzeczownikiem
  * pomocniczym — zawsze poprawnej gramatycznie.
+ *
+ * Po angielsku odmiany nie ma — zawsze „in {miasto}".
  */
-export function cityInPhrase(city: string): string {
+export function cityInPhrase(city: string, locale: "pl" | "en" = "pl"): string {
   const display = cityDisplay(city);
+  if (locale === "en") return `in ${display}`;
   const locative = LOCATIVE[display];
   return locative ? `w ${locative}` : `w mieście ${display}`;
 }

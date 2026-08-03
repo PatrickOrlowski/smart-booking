@@ -179,10 +179,22 @@ describe("turn time zależny od liczby osób", () => {
     expect(compute({ partySize: 6 }).durationMin).toBe(120);
   });
 
-  it("brak pasującej reguły → domyślny czas lokalu", () => {
-    // Reguły kończą się na 14 osobach.
+  it("grupa ponad najwyższą regułę dostaje JEJ czas, nie domyślny", () => {
+    // Reguły kończą się na 14 osobach (150 min). Domyślne 75 minut byłoby
+    // KRÓTSZE niż dla czternastki — stolik szedłby dalej, zanim grupa wstanie.
     const result = compute({ partySize: 20, defaultTurnTimeMin: 75 });
-    expect(result.durationMin).toBe(75);
+    expect(result.durationMin).toBe(150);
+  });
+
+  it("brak jakichkolwiek reguł → domyślny czas lokalu", () => {
+    expect(turnTimeForPartySize([], 20, 75)).toBe(75);
+  });
+
+  it("grupa poniżej najniższej reguły → domyślny czas lokalu", () => {
+    // Dziura POD regułami to nie ten sam przypadek co grupa ponad zakres:
+    // krótszy pobyt małej grupy nie zabiera stolika nikomu.
+    const aboveOne = [{ partySizeMin: 3, partySizeMax: 6, durationMin: 120 }];
+    expect(turnTimeForPartySize(aboveOne, 2, 75)).toBe(75);
   });
 
   it("turnTimeForPartySize: pierwsza pasująca reguła wygrywa", () => {
@@ -191,7 +203,9 @@ describe("turn time zależny od liczby osób", () => {
       { partySizeMin: 3, partySizeMax: 4, durationMin: 105 },
     ];
     expect(turnTimeForPartySize(overlapping, 4, 90)).toBe(60);
-    expect(turnTimeForPartySize(overlapping, 5, 90)).toBe(90);
+    // Piątka wychodzi poza zakres — dostaje regułę o największym
+    // `partySizeMax` (przy remisie pierwszą), a nie 90 z lokalizacji.
+    expect(turnTimeForPartySize(overlapping, 5, 90)).toBe(60);
   });
 
   it("dłuższy turn time skraca listę godzin", () => {
@@ -607,6 +621,26 @@ describe("rewalidacja konkretnego stolika", () => {
       restrictTo: { combinationId: "c12" },
     });
     expect(result.slots[0].tableIds).toEqual(["t2a", "t2b"]);
+  });
+
+  it("restrictTo z combinationId I tableIds obowiązuje łącznie", () => {
+    // Zgodny komplet: zestawienie c12 to dokładnie t2a + t2b.
+    expect(
+      compute({
+        partySize: 3,
+        restrictTo: { combinationId: "c12", tableIds: ["t2a", "t2b"] },
+      }).slots[0].tableIds,
+    ).toEqual(["t2a", "t2b"]);
+
+    // Sprzeczny komplet nie może po cichu przejść jako sam `combinationId` —
+    // inaczej rezerwacja lądowała na stolikach zestawienia zamiast na tych,
+    // o które prosił klient.
+    expect(
+      compute({
+        partySize: 3,
+        restrictTo: { combinationId: "c12", tableIds: ["t2b"] },
+      }).slots,
+    ).toHaveLength(0);
   });
 
   it("findTableSlotAt trafia w konkretny start albo zwraca null", () => {

@@ -45,6 +45,82 @@ function revalidate() {
   revalidatePath("/panel/dzis");
 }
 
+/**
+ * Ile NADCHODZĄCYCH rezerwacji blokuje stolik.
+ *
+ * Liczy się wyłącznie to, co jeszcze się nie odbyło i nie zostało odwołane —
+ * historia nie jest powodem, żeby zabraniać wyłączenia stolika, ale jutrzejsza
+ * kolacja jak najbardziej (stolik zniknąłby z planu hosta i licznika zajętości,
+ * a rezerwacja została w bazie).
+ */
+async function countUpcomingBookings(
+  resourceId: string,
+  now: Date,
+): Promise<number> {
+  return prisma.bookingItem.count({
+    where: {
+      resourceId,
+      isBlocking: true,
+      blockedEndAt: { gt: now },
+      booking: { status: { in: ["PENDING", "CONFIRMED"] } },
+    },
+  });
+}
+
+/**
+ * Przelicza pojemność zestawień, które straciły stolik.
+ *
+ * Zestawienie „9+10+11" (trzy czwórki, capacityMax 12) po usunięciu stolika 11
+ * zostawało aktywne z limitem 12 osób i silnik sadzał dwunastkę przy ośmiu
+ * miejscach. Zawężenie ręczne managera zostaje uszanowane — pojemność wyłącznie
+ * SPADA do fizycznej sumy miejsc.
+ */
+async function recalculateCombinations(
+  tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
+  combinationIds: string[],
+): Promise<void> {
+  for (const combinationId of combinationIds) {
+    const members = await tx.tableCombinationMember.findMany({
+      where: { combinationId },
+      select: {
+        resource: { select: { capacityMin: true, capacityMax: true } },
+      },
+    });
+
+    // Zestawienie z jednym stolikiem przestaje być zestawieniem.
+    if (members.length < 2) {
+      await tx.tableCombination.update({
+        where: { id: combinationId },
+        data: { isActive: false },
+      });
+      continue;
+    }
+
+    const seatsMax = members.reduce(
+      (sum, member) =>
+        sum + (member.resource.capacityMax ?? member.resource.capacityMin ?? 1),
+      0,
+    );
+    const combination = await tx.tableCombination.findUnique({
+      where: { id: combinationId },
+      select: { capacityMin: true, capacityMax: true },
+    });
+    if (!combination) continue;
+
+    const capacityMax = Math.min(combination.capacityMax, seatsMax);
+    const capacityMin = Math.min(combination.capacityMin, capacityMax);
+    if (
+      capacityMax !== combination.capacityMax ||
+      capacityMin !== combination.capacityMin
+    ) {
+      await tx.tableCombination.update({
+        where: { id: combinationId },
+        data: { capacityMin, capacityMax },
+      });
+    }
+  }
+}
+
 /** Lokalizacja należąca do firmy — punkt wejścia wszystkich sprawdzeń. */
 async function requireLocation(businessId: string, locationId: string) {
   await requireBusinessManager(businessId);
@@ -60,13 +136,26 @@ async function requireLocation(businessId: string, locationId: string) {
 // Sale
 // ---------------------------------------------------------------------------
 
+/**
+ * Wszystkie granice liczbowe mają WŁASNY polski komunikat: Zod 4 domyślnie
+ * zwraca angielskie „Too big: expected number to be <=50", a te teksty trafiają
+ * prosto do toastu w panelu.
+ */
 const saveRoomSchema = z.object({
   businessId: z.string().min(1),
   locationId: z.string().min(1),
   roomId: z.string().min(1).optional(),
-  name: z.string().trim().min(2, "Podaj nazwę sali").max(80),
-  gridWidth: z.number().int().min(GRID_MIN).max(GRID_MAX),
-  gridHeight: z.number().int().min(GRID_MIN).max(GRID_MAX),
+  name: z.string().trim().min(2, "Podaj nazwę sali").max(80, "Nazwa sali: maksymalnie 80 znaków"),
+  gridWidth: z
+    .number()
+    .int()
+    .min(GRID_MIN, `Szerokość siatki: minimum ${GRID_MIN} komórek`)
+    .max(GRID_MAX, `Szerokość siatki: maksymalnie ${GRID_MAX} komórek`),
+  gridHeight: z
+    .number()
+    .int()
+    .min(GRID_MIN, `Wysokość siatki: minimum ${GRID_MIN} komórek`)
+    .max(GRID_MAX, `Wysokość siatki: maksymalnie ${GRID_MAX} komórek`),
 });
 
 /** Dodanie lub edycja sali (nazwa + rozmiar siatki planu). */
@@ -188,16 +277,44 @@ const saveTableSchema = z
     locationId: z.string().min(1),
     tableId: z.string().min(1).optional(),
     roomId: z.string().min(1),
-    tableNumber: z.string().trim().min(1, "Podaj numer stolika").max(10),
-    capacityMin: z.number().int().min(1, "Minimum to 1 osoba").max(50),
-    capacityMax: z.number().int().min(1).max(50),
+    tableNumber: z
+      .string()
+      .trim()
+      .min(1, "Podaj numer stolika")
+      .max(10, "Numer stolika: maksymalnie 10 znaków"),
+    capacityMin: z
+      .number()
+      .int()
+      .min(1, "Pojemność od: minimum 1 osoba")
+      .max(50, "Pojemność od: maksymalnie 50 osób"),
+    capacityMax: z
+      .number()
+      .int()
+      .min(1, "Pojemność do: minimum 1 osoba")
+      .max(50, "Pojemność do: maksymalnie 50 osób"),
     shape: z.enum(TableShape),
     area: z.enum(RestaurantArea),
     combinable: z.boolean(),
-    posX: z.number().int().min(0).max(GRID_MAX),
-    posY: z.number().int().min(0).max(GRID_MAX),
-    spanX: z.number().int().min(SPAN_MIN).max(SPAN_MAX),
-    spanY: z.number().int().min(SPAN_MIN).max(SPAN_MAX),
+    posX: z
+      .number()
+      .int()
+      .min(0, "Pozycja X musi być w siatce")
+      .max(GRID_MAX, `Pozycja X: maksymalnie ${GRID_MAX}`),
+    posY: z
+      .number()
+      .int()
+      .min(0, "Pozycja Y musi być w siatce")
+      .max(GRID_MAX, `Pozycja Y: maksymalnie ${GRID_MAX}`),
+    spanX: z
+      .number()
+      .int()
+      .min(SPAN_MIN, `Szerokość kafla: minimum ${SPAN_MIN}`)
+      .max(SPAN_MAX, `Szerokość kafla: maksymalnie ${SPAN_MAX}`),
+    spanY: z
+      .number()
+      .int()
+      .min(SPAN_MIN, `Wysokość kafla: minimum ${SPAN_MIN}`)
+      .max(SPAN_MAX, `Wysokość kafla: maksymalnie ${SPAN_MAX}`),
     isActive: z.boolean(),
   })
   .refine((value) => value.capacityMin <= value.capacityMax, {
@@ -231,9 +348,21 @@ export async function saveTableAction(input: unknown): Promise<ActionResult> {
           type: "TABLE",
           locationId: data.locationId,
         },
-        select: { id: true },
+        select: { id: true, isActive: true },
       });
       if (!existing) return { ok: false, error: "Nie znaleziono stolika" };
+
+      // Przełącznik „Stolik dostępny" wyłączał stolik bez ostrzeżenia, mimo
+      // przyszłych rezerwacji — te znikały z planu hosta, ale zostawały w bazie.
+      if (existing.isActive && !data.isActive) {
+        const upcoming = await countUpcomingBookings(existing.id, new Date());
+        if (upcoming > 0) {
+          return {
+            ok: false,
+            error: `Stolik ma ${upcoming} nadchodzących rezerwacji — najpierw przenieś je na inny stolik albo odwołaj`,
+          };
+        }
+      }
     }
 
     const duplicate = await prisma.resource.findFirst({
@@ -342,8 +471,16 @@ export async function saveTableAction(input: unknown): Promise<ActionResult> {
 const moveTableSchema = z.object({
   businessId: z.string().min(1),
   tableId: z.string().min(1),
-  posX: z.number().int().min(0).max(GRID_MAX),
-  posY: z.number().int().min(0).max(GRID_MAX),
+  posX: z
+    .number()
+    .int()
+    .min(0, "Pozycja X musi być w siatce")
+    .max(GRID_MAX, `Pozycja X: maksymalnie ${GRID_MAX}`),
+  posY: z
+    .number()
+    .int()
+    .min(0, "Pozycja Y musi być w siatce")
+    .max(GRID_MAX, `Pozycja Y: maksymalnie ${GRID_MAX}`),
 });
 
 /**
@@ -432,7 +569,9 @@ const deleteTableSchema = z.object({
 
 /**
  * Usunięcie stolika. Stolik z rezerwacjami w historii nie znika z bazy —
- * zostaje dezaktywowany, żeby nie osierocić BookingItem.
+ * zostaje dezaktywowany, żeby nie osierocić BookingItem. Stolik z rezerwacjami
+ * NADCHODZĄCYMI nie znika ani nie gaśnie: zniknąłby z planu hosta i licznika
+ * zajętości, a goście nadal mieliby na niego potwierdzenie.
  */
 export async function deleteTableAction(
   input: unknown,
@@ -458,6 +597,14 @@ export async function deleteTableAction(
     });
     if (!table) return { ok: false, error: "Nie znaleziono stolika" };
 
+    const upcoming = await countUpcomingBookings(table.id, new Date());
+    if (upcoming > 0) {
+      return {
+        ok: false,
+        error: `Stolik ma ${upcoming} nadchodzących rezerwacji — najpierw przenieś je na inny stolik albo odwołaj`,
+      };
+    }
+
     if (table._count.bookingItems > 0) {
       await prisma.resource.update({
         where: { id: table.id },
@@ -466,23 +613,17 @@ export async function deleteTableAction(
       deactivated = true;
     } else {
       await prisma.$transaction(async (tx) => {
-        await tx.resource.delete({ where: { id: table.id } });
-        // Członkostwa znikają kaskadowo — zestawienie z jednym stolikiem
-        // przestaje być zestawieniem, więc gaśnie zamiast po cichu blokować
-        // rezerwacje dużych grup.
-        const orphaned = await tx.tableCombination.findMany({
-          where: { locationId: table.locationId, isActive: true },
-          select: { id: true, _count: { select: { members: true } } },
+        // Zestawienia, do których stolik należał — czytamy PRZED kasowaniem,
+        // bo członkostwa znikają kaskadowo.
+        const memberships = await tx.tableCombinationMember.findMany({
+          where: { resourceId: table.id },
+          select: { combinationId: true },
         });
-        const ids = orphaned
-          .filter((combination) => combination._count.members < 2)
-          .map((combination) => combination.id);
-        if (ids.length > 0) {
-          await tx.tableCombination.updateMany({
-            where: { id: { in: ids } },
-            data: { isActive: false },
-          });
-        }
+        await tx.resource.delete({ where: { id: table.id } });
+        await recalculateCombinations(
+          tx,
+          memberships.map((membership) => membership.combinationId),
+        );
       });
     }
   } catch (error) {
@@ -502,13 +643,25 @@ const saveCombinationSchema = z
     businessId: z.string().min(1),
     locationId: z.string().min(1),
     combinationId: z.string().min(1).optional(),
-    name: z.string().trim().min(1, "Podaj nazwę zestawienia").max(60),
-    capacityMin: z.number().int().min(1).max(100),
-    capacityMax: z.number().int().min(1).max(100),
+    name: z
+      .string()
+      .trim()
+      .min(1, "Podaj nazwę zestawienia")
+      .max(60, "Nazwa zestawienia: maksymalnie 60 znaków"),
+    capacityMin: z
+      .number()
+      .int()
+      .min(1, "Pojemność od: minimum 1 osoba")
+      .max(100, "Pojemność od: maksymalnie 100 osób"),
+    capacityMax: z
+      .number()
+      .int()
+      .min(1, "Pojemność do: minimum 1 osoba")
+      .max(100, "Pojemność do: maksymalnie 100 osób"),
     resourceIds: z
       .array(z.string().min(1))
       .min(2, "Zestawienie musi mieć co najmniej 2 stoliki")
-      .max(12),
+      .max(12, "Zestawienie: maksymalnie 12 stolików"),
     isActive: z.boolean(),
   })
   .refine((value) => value.capacityMin <= value.capacityMax, {
@@ -537,15 +690,48 @@ export async function saveCombinationAction(
 
     // Stoliki muszą należeć do TEJ lokalizacji — inaczej dałoby się zestawić
     // stolik z cudzego lokalu i zablokować go rezerwacją.
-    const valid = await prisma.resource.count({
+    const chosen = await prisma.resource.findMany({
       where: {
         id: { in: resourceIds },
         type: "TABLE",
         locationId: data.locationId,
       },
+      select: {
+        id: true,
+        tableNumber: true,
+        combinable: true,
+        capacityMin: true,
+        capacityMax: true,
+      },
     });
-    if (valid !== resourceIds.length) {
+    if (chosen.length !== resourceIds.length) {
       return { ok: false, error: "Wybrane stoliki nie należą do tego lokalu" };
+    }
+
+    // `Resource.combinable` była dotąd martwą daną: dialog pisał „nie zestawia
+    // się", ale checkbox i tak działał, a silnik proponował gościom układ,
+    // którego obsługa fizycznie nie zestawi.
+    const notCombinable = chosen.filter((table) => !table.combinable);
+    if (notCombinable.length > 0) {
+      const numbers = notCombinable
+        .map((table) => table.tableNumber ?? "?")
+        .join(", ");
+      return {
+        ok: false,
+        error: `Stoliki oznaczone jako niezestawialne: ${numbers}. Odznacz je albo zmień ustawienie stolika.`,
+      };
+    }
+
+    // Zestawienie nie może obiecywać więcej miejsc, niż jest przy stołach.
+    const seatsMax = chosen.reduce(
+      (sum, table) => sum + (table.capacityMax ?? table.capacityMin ?? 1),
+      0,
+    );
+    if (data.capacityMax > seatsMax) {
+      return {
+        ok: false,
+        error: `Wybrane stoliki mają razem ${seatsMax} miejsc — „pojemność do" nie może być większa`,
+      };
     }
 
     if (data.combinationId) {
@@ -639,13 +825,21 @@ const saveTurnTimeSchema = z
     businessId: z.string().min(1),
     locationId: z.string().min(1),
     ruleId: z.string().min(1).optional(),
-    partySizeMin: z.number().int().min(1, "Minimum to 1 osoba").max(100),
-    partySizeMax: z.number().int().min(1).max(100),
+    partySizeMin: z
+      .number()
+      .int()
+      .min(1, "Liczba osób od: minimum 1")
+      .max(100, "Liczba osób od: maksymalnie 100"),
+    partySizeMax: z
+      .number()
+      .int()
+      .min(1, "Liczba osób do: minimum 1")
+      .max(100, "Liczba osób do: maksymalnie 100"),
     durationMin: z
       .number()
       .int()
       .min(15, "Czas zajęcia stolika: minimum 15 minut")
-      .max(600),
+      .max(600, "Czas zajęcia stolika: maksymalnie 600 minut"),
   })
   .refine((value) => value.partySizeMin <= value.partySizeMax, {
     message: "Zakres osób jest odwrócony (od > do)",
@@ -751,16 +945,39 @@ const savePacingSchema = z
     businessId: z.string().min(1),
     locationId: z.string().min(1),
     ruleId: z.string().min(1).optional(),
-    weekday: z.number().int().min(0).max(6).nullable(),
-    startMinute: z.number().int().min(0).max(24 * 60),
-    endMinute: z.number().int().min(0).max(24 * 60),
+    weekday: z
+      .number()
+      .int()
+      .min(0, "Nieprawidłowy dzień tygodnia")
+      .max(6, "Nieprawidłowy dzień tygodnia")
+      .nullable(),
+    startMinute: z
+      .number()
+      .int()
+      .min(0, "Godzina początku jest poza dobą")
+      .max(24 * 60, "Godzina początku jest poza dobą"),
+    endMinute: z
+      .number()
+      .int()
+      .min(0, "Godzina końca jest poza dobą")
+      .max(24 * 60, "Godzina końca jest poza dobą"),
     intervalMin: z
       .number()
       .int()
       .min(5, "Interwał: minimum 5 minut")
-      .max(240),
-    maxCovers: z.number().int().min(1).max(999).nullable(),
-    maxBookings: z.number().int().min(1).max(999).nullable(),
+      .max(240, "Interwał: maksymalnie 240 minut"),
+    maxCovers: z
+      .number()
+      .int()
+      .min(1, "Limit osób: minimum 1")
+      .max(999, "Limit osób: maksymalnie 999")
+      .nullable(),
+    maxBookings: z
+      .number()
+      .int()
+      .min(1, "Limit rezerwacji: minimum 1")
+      .max(999, "Limit rezerwacji: maksymalnie 999")
+      .nullable(),
   })
   .refine((value) => value.startMinute < value.endMinute, {
     message: "Okno godzinowe musi się kończyć później, niż zaczyna",
@@ -854,9 +1071,18 @@ const saveSettingsSchema = z.object({
     .number()
     .int()
     .min(15, "Domyślny czas: minimum 15 minut")
-    .max(600),
-  tableBufferMin: z.number().int().min(0).max(120),
-  maxPartySizeOnline: z.number().int().min(1).max(100).nullable(),
+    .max(600, "Domyślny czas: maksymalnie 600 minut"),
+  tableBufferMin: z
+    .number()
+    .int()
+    .min(0, "Bufor sprzątania nie może być ujemny")
+    .max(120, "Bufor sprzątania: maksymalnie 120 minut"),
+  maxPartySizeOnline: z
+    .number()
+    .int()
+    .min(1, "Limit grupy online: minimum 1 osoba")
+    .max(100, "Limit grupy online: maksymalnie 100 osób")
+    .nullable(),
   waitlistEnabled: z.boolean(),
 });
 

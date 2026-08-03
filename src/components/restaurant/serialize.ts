@@ -40,6 +40,7 @@ export function toBookingData(
     maxAdvanceDays: location.maxAdvanceDays,
     maxPartySizeOnline: location.maxPartySizeOnline,
     maxPartySizeSeatable: context.maxPartySizeSeatable,
+    minPartySizeSeatable: context.minPartySizeSeatable,
     waitlistEnabled: location.waitlistEnabled,
     nowIso: now.toISOString(),
     user,

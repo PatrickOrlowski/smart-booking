@@ -20,7 +20,11 @@ import {
 /**
  * Lista oczekujących na dziś: wpisy WAITING/NOTIFIED z akcjami hosta.
  * Wpis z minionym `holdUntil` pokazujemy jako przeterminowany (EXPIRED) —
- * blokada stolika wygasła, choć w bazie wpis wciąż czeka na decyzję.
+ * minął termin odpowiedzi gościa, choć w bazie wpis wciąż czeka na decyzję.
+ *
+ * `holdUntil` NIE blokuje stolika (nie czyta go ani `getTableOccupancy`,
+ * ani silnik dostępności) — dlatego etykieta mówi o odpowiedzi gościa,
+ * a nie o rezerwacji stolika.
  */
 
 export type WaitlistView = "waiting" | "notified" | "expired";
@@ -179,7 +183,7 @@ function WaitlistCard({
           <div className="mt-1 font-mono text-[11.5px] text-muted-foreground">
             {entry.partySize} os. · elastyczność ±{entry.flexMin} min
             {entry.holdUntilLabel
-              ? ` · ${entry.view === "expired" ? "blokada wygasła" : "blokada do"} ${entry.holdUntilLabel}`
+              ? ` · ${entry.view === "expired" ? "brak odpowiedzi do" : "czeka na odpowiedź do"} ${entry.holdUntilLabel}`
               : ""}
           </div>
           {entry.phone || entry.email ? (

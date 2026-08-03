@@ -105,7 +105,13 @@ export async function saveServiceAction(input: unknown): Promise<ActionResult> {
     // względem firmy przed zapisem.
     if (data.serviceId) {
       const service = await prisma.service.findFirst({
-        where: { id: data.serviceId, businessId: data.businessId },
+        // `kind: STANDARD` domyka cennik: usługa techniczna rezerwacji
+        // stolika nie jest edytowalna z tego ekranu (patrz uslugi/page.tsx).
+        where: {
+          id: data.serviceId,
+          businessId: data.businessId,
+          kind: "STANDARD",
+        },
         select: { id: true },
       });
       if (!service) return { ok: false, error: "Nie znaleziono usługi" };
@@ -215,8 +221,14 @@ export async function toggleServiceActiveAction(
 
   try {
     await requireBusinessManager(data.businessId);
+    // Usługa techniczna rezerwacji stolika nie ma przełącznika — jej
+    // wyłączenie zabiłoby publiczny tor rezerwacji stolików (404).
     const updated = await prisma.service.updateMany({
-      where: { id: data.serviceId, businessId: data.businessId },
+      where: {
+        id: data.serviceId,
+        businessId: data.businessId,
+        kind: "STANDARD",
+      },
       data: { isActive: data.isActive },
     });
     if (updated.count === 0) return { ok: false, error: "Nie znaleziono usługi" };
@@ -249,7 +261,13 @@ export async function deleteServiceAction(
   try {
     await requireBusinessManager(data.businessId);
     const service = await prisma.service.findFirst({
-      where: { id: data.serviceId, businessId: data.businessId },
+      // Usługi technicznej (TABLE_RESERVATION) nie da się skasować — bez niej
+      // padają walk-iny, konwersje z listy oczekujących i rezerwacje online.
+      where: {
+        id: data.serviceId,
+        businessId: data.businessId,
+        kind: "STANDARD",
+      },
       select: { id: true, _count: { select: { bookingItems: true } } },
     });
     if (!service) return { ok: false, error: "Nie znaleziono usługi" };

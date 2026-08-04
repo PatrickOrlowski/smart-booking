@@ -360,14 +360,68 @@ Zakres implementacji (bez RODO — wyłączone przez użytkownika 01.08.2026):
 panel admina platformy, kody rabatowe i karnety, rezerwacje cykliczne,
 publiczne API z webhookami i widgetem, PL/EN na części publicznej.
 
+**Reszta Fazy 3 — ZROBIONA (04.08.2026).** Wyszukiwanie geo: Haversine + bounding box
+z testami (`src/lib/geo.ts`), „Użyj mojej lokalizacji" na stronie głównej, odległości
+na kartach, działający chip „< 2 km", API `lat/lng/radiusKm`, „Najbliżej centrum" na
+stronach miast. Powiadomienia: SMS przez SMSAPI za flagą env (`src/lib/sms.ts`,
+limit jednej wiadomości z detekcją GSM-7/UCS-2), web push (VAPID + service worker,
+sekcja „Powiadomienia" w koncie), cron przypomnień rozszerzony o oba kanały
+z deduplikacją per kanał. Weryfikacja: 14 findingów, 9 naprawionych (m.in. starvation
+partii crona przez rezerwacje bez kontaktu, pozycja w URL z dokładnością budynku,
+SMS-y sklejane przy diakrytykach). Testy: 168 zielonych.
+
 ## 5b. Kolejne kroki
 
 1. Deploy na Vercel (env: DATABASE_URL, DIRECT_URL, AUTH_SECRET, CRON_SECRET, opcjonalnie
-   RESEND_API_KEY i STRIPE_*; build ma już `prisma generate`, migracje:
-   `npx prisma migrate deploy` w predeploy).
-2. Reszta Fazy 3: wyszukiwanie geo po odległości, przypomnienia SMS/push.
-3. Faza 6: wniosek urlopowy pracownika (reszta panelu gotowa).
-4. Faza 7: restauracje — stoliki, plan sali, `partySize`, turn time, pacing, waitlist.
+   RESEND_API_KEY, STRIPE_*, SMSAPI_TOKEN, VAPID_*; build ma już `prisma generate`,
+   migracje: `npx prisma migrate deploy` w predeploy).
+2. Faza 6 (reszta): wniosek urlopowy pracownika.
+3. Odłożone decyzją użytkownika: RODO (eksport/usunięcie danych, retencja, zgody
+   marketingowe) — do zrobienia przed publicznym startem w UE; natywna aplikacja
+   mobilna (mobile/ zamrożone).
+
+## Faza 9 — produkcja i zaufanie (pomysły)
+
+Cel: platforma gotowa na prawdziwych użytkowników i prawdziwe pieniądze.
+
+- **Deploy i środowiska**: Vercel (preview/prod), `migrate deploy` w pipeline, seed tylko
+  poza produkcją; monitoring błędów (Sentry), logi strukturalne, health-check; backup
+  i próba odtworzenia bazy (nie „mamy backup", tylko „odtworzyliśmy go w teście").
+- **Zdjęcia naprawdę**: upload do Vercel Blob/S3 (logo, cover, galeria, avatary,
+  zdjęcia stolików), crop w panelu, optymalizacja next/image — koniec placeholderów.
+- **Twarde bezpieczeństwo**: rate limiting współdzielony (Upstash Redis zamiast
+  in-memory), 2FA dla właścicieli i adminów, sesje urządzeń („wyloguj wszędzie"),
+  captcha na rejestracji i rezerwacji gościa, nagłówki CSP.
+- **Wydajność pod ruch**: denormalizacja `ratingAvg`/`ratingCount` na Business
+  (dziś liczone z wierszy przy każdym renderze), cache dostępności z inwalidacją
+  po zapisie rezerwacji, paginacja wszystkich listingów, budżety Lighthouse.
+- **Jakość operacyjna**: strona statusu, alerty na nieudane crony/webhooki,
+  panel „zdrowie platformy" dla admina (kolejki, wysyłki, błędy providerów).
+- **SEO 2.0**: strony „usługa w mieście" (/strzyzenie-meskie/warszawa), opinie
+  w wynikach (rich snippets), OG images generowane per firma.
+
+## Faza 10 — wzrost i przewaga (pomysły)
+
+Cel: rzeczy, które przyciągają i zatrzymują firmy na platformie.
+
+- **Pieniądze domknięte**: subskrypcje firm przez Stripe Billing (dziś MANUAL),
+  faktury VAT automatyczne, prowizja marketplace od rezerwacji jako model przychodu,
+  wypłaty dla firm (Stripe Connect), raport rozliczeń miesięcznych.
+- **Wzrost**: program poleceń (klient → klient, firma → firma), karty podarunkowe
+  na okaziciela, kampanie e-mail do bazy klientów firmy („wróć do nas — 20% rabatu",
+  na bazie zgód — wymaga domknięcia RODO), odzyskiwanie porzuconych rezerwacji
+  (hold wygasł → mail „dokończ rezerwację").
+- **Grafik pro**: zmiany i rotacje (shift planning), pracownik w wielu lokalizacjach,
+  zasoby współwymagane (usługa = pracownik + gabinet + sprzęt jednocześnie — model
+  `ROOM`/`EQUIPMENT` już czeka w `ResourceType`), urlopy z limitami i akceptacją.
+- **Inteligencja**: sugestie slotów wyrównujące obłożenie (yield), dynamiczne
+  ceny off-peak (happy hours -20% we wtorki rano), prognoza no-show na podstawie
+  historii klienta, autouzupełnianie luk w grafiku z listy oczekujących.
+- **Marketplace głębiej**: pakiety usług między firmami (dzień SPA), rezerwacje
+  grupowe (panieński — 4 osoby, 2 pracowników równolegle), abonamenty klienckie
+  („broda co 2 tygodnie" z automatyczną płatnością — `BookingSeries` + Stripe).
+- **Analityka platformy**: kohorty retencji firm i klientów, LTV, lejek
+  rezerwacji (wejście → profil → checkout → potwierdzenie), A/B testy treści.
 
 ---
 

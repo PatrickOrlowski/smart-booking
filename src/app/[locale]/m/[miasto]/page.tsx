@@ -23,6 +23,8 @@ import {
   getCityIndex,
   resolveCity,
 } from "@/app/m/miasta";
+import { haversineKm } from "@/lib/geo";
+import { distanceLabel } from "@/components/marketplace/format";
 
 /**
  * Strona SEO miasta. Publiczny adres to /m/warszawa — proxy (src/proxy.ts)
@@ -89,7 +91,13 @@ export async function generateMetadata({
  */
 type ListingBusiness = BusinessCardData & {
   type: BusinessType;
-  locations: { addressLine1: string; city: string; timezone: string }[];
+  locations: {
+    addressLine1: string;
+    city: string;
+    timezone: string;
+    latitude: number | null;
+    longitude: number | null;
+  }[];
 };
 
 async function findBusinessesInCity(
@@ -117,7 +125,13 @@ async function findBusinessesInCity(
           // Firma z kilkoma lokalami ma pokazać adres tego z oglądanego miasta.
           where: { isActive: true, city: cityFilter },
           take: 1,
-          select: { addressLine1: true, city: true, timezone: true },
+          select: {
+            addressLine1: true,
+            city: true,
+            timezone: true,
+            latitude: true,
+            longitude: true,
+          },
         },
         services: {
           where: {
@@ -168,6 +182,39 @@ async function findBusinessesInCity(
   };
 }
 
+/**
+ * Sekcja „Najbliżej centrum": centroid liczymy ze współrzędnych lokalizacji
+ * firm tego miasta (bez geolokalizacji użytkownika — strona zostaje ISR-owa)
+ * i sortujemy firmy po odległości Haversine od niego. Sekcja ma sens dopiero
+ * od dwóch firm ze współrzędnymi — jedna byłaby „centrum" sama dla siebie.
+ */
+function closestToCentre(
+  businesses: ListingBusiness[],
+): { business: ListingBusiness; distanceKm: number }[] {
+  const located = businesses.flatMap((business) => {
+    const location = business.locations[0];
+    return location && location.latitude !== null && location.longitude !== null
+      ? [{ business, point: { lat: location.latitude, lng: location.longitude } }]
+      : [];
+  });
+  if (located.length < 2) return [];
+
+  const centroid = {
+    lat:
+      located.reduce((sum, entry) => sum + entry.point.lat, 0) / located.length,
+    lng:
+      located.reduce((sum, entry) => sum + entry.point.lng, 0) / located.length,
+  };
+
+  return located
+    .map((entry) => ({
+      business: entry.business,
+      distanceKm: haversineKm(centroid, entry.point),
+    }))
+    .sort((a, b) => a.distanceKm - b.distanceKm)
+    .slice(0, 3);
+}
+
 export default async function CityPage({
   params,
 }: {
@@ -183,6 +230,7 @@ export default async function CityPage({
     await cityVariants(miasto),
     locale,
   );
+  const closest = closestToCentre(businesses);
 
   return (
     <LocaleProvider locale={locale}>
@@ -195,6 +243,35 @@ export default async function CityPage({
         <p className="mb-6 max-w-xl text-[13px] leading-relaxed text-muted-foreground">
           {t("city.subtitle")}
         </p>
+
+        {closest.length > 0 ? (
+          <section className="mb-8">
+            <div className="mb-3 flex items-baseline justify-between">
+              <h2 className="font-display text-base font-bold tracking-tight">
+                {t("city.closest")}
+              </h2>
+            </div>
+            <div className="flex flex-col gap-3.5 md:grid md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-5">
+              {closest.map(({ business, distanceKm }) =>
+                business.type === "RESTAURANT" ? (
+                  <RestaurantCard
+                    key={`closest-${business.id}`}
+                    business={business}
+                    locale={locale}
+                    distanceLabel={distanceLabel(distanceKm, locale)}
+                  />
+                ) : (
+                  <BusinessCard
+                    key={`closest-${business.id}`}
+                    business={business}
+                    locale={locale}
+                    distanceLabel={distanceLabel(distanceKm, locale)}
+                  />
+                ),
+              )}
+            </div>
+          </section>
+        ) : null}
 
         <div className="mb-3 flex items-baseline justify-between">
           <h2 className="font-display text-base font-bold tracking-tight">

@@ -90,6 +90,27 @@ export function priceLabel(
 
 export const formatDuration = (minutes: number): string => `${minutes} min`;
 
+/**
+ * Etykieta odległości na kartach (DM Mono): poniżej kilometra w metrach
+ * („850 m"), dalej w km z jednym miejscem po przecinku („1,2 km" / "1.2 km"),
+ * od 10 km bez ułamka („12 km"). Kilometry w OBU językach — bez mil.
+ */
+export function distanceLabel(
+  distanceKm: number,
+  locale: Locale = DEFAULT_LOCALE,
+): string {
+  const t = createTranslator(locale);
+  // Zaokrąglenie do 10 m — dokładność GPS i tak nie uzasadnia „847 m".
+  const meters = Math.max(10, Math.round((distanceKm * 1000) / 10) * 10);
+  if (meters < 1000) return t("format.distanceM", { m: meters });
+  const separator = locale === "pl" ? "," : ".";
+  const km =
+    distanceKm >= 10
+      ? String(Math.round(distanceKm))
+      : (Math.round(distanceKm * 10) / 10).toFixed(1).replace(".", separator);
+  return t("format.distanceKm", { km });
+}
+
 const pad = (value: number) => String(value).padStart(2, "0");
 
 /** "15:30" w strefie lokalu (24 h w obu językach — konwencja europejska). */

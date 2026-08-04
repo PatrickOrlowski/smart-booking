@@ -61,11 +61,14 @@ export function BusinessCard({
   business,
   promoted = false,
   slotLabel,
+  distanceLabel,
   locale = DEFAULT_LOCALE,
 }: {
   business: BusinessCardData;
   promoted?: boolean;
   slotLabel?: string | null;
+  /** Etykieta odległości („1,2 km") — listingi geo; DM Mono na karcie. */
+  distanceLabel?: string;
   locale?: Locale;
 }) {
   const t = createTranslator(locale);
@@ -98,6 +101,14 @@ export function BusinessCard({
           </div>
           <div className="mt-[3px] text-xs text-muted-foreground">
             {address}
+            {distanceLabel ? (
+              <>
+                {" · "}
+                <span className="font-mono text-[11px] font-medium">
+                  {distanceLabel}
+                </span>
+              </>
+            ) : null}
             {priceFrom
               ? ` · ${t("format.priceFrom", { price: formatPrice(priceFrom.priceCents, priceFrom.currency, locale) })}`
               : ""}
@@ -128,6 +139,14 @@ export function BusinessCard({
         </div>
         <div className="mt-0.5 text-xs text-muted-foreground md:mt-[3px]">
           {address ? `${address} · ` : ""}
+          {distanceLabel ? (
+            <>
+              <span className="font-mono text-[11px] font-medium">
+                {distanceLabel}
+              </span>
+              {" · "}
+            </>
+          ) : null}
           {rating.score} ({rating.count})
         </div>
         {slotLabel !== undefined ? (

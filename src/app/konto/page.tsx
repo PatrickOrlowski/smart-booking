@@ -26,7 +26,10 @@ import {
   expireCustomerPackages,
 } from "@/lib/packages";
 import { CancelBookingDialog } from "@/components/konto/cancel-booking-dialog";
+import { PushToggle } from "@/components/konto/push-toggle";
 import { ReviewForm } from "@/components/konto/review-form";
+import { env } from "@/lib/env";
+import { isPushEnabled } from "@/lib/push";
 import { LocaleProvider } from "@/i18n/client";
 import { getTranslations } from "@/i18n/server";
 import { INTL_LOCALE, type Translations } from "@/i18n";
@@ -637,6 +640,18 @@ export default async function KontoPage() {
             )}
           </TabsContent>
         </Tabs>
+
+        {/* POWIADOMIENIA — web push per urządzenie. Bez kluczy VAPID sekcja
+            pokazuje dopisek „wkrótce" zamiast przełącznika. */}
+        <section className="mt-10">
+          <div className="meta-label">{t("konto.notif.label")}</div>
+          <div className="mt-3">
+            <PushToggle
+              configured={isPushEnabled()}
+              vapidPublicKey={env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? null}
+            />
+          </div>
+        </section>
       </main>
     </LocaleProvider>
   );

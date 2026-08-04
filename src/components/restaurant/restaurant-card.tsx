@@ -27,12 +27,15 @@ export function RestaurantCard({
   business,
   promoted = false,
   slotLabel,
+  distanceLabel,
   locale = DEFAULT_LOCALE,
 }: {
   business: RestaurantCardData;
   promoted?: boolean;
   /** Pominięcie propsa włącza doliczenie po stronie klienta. */
   slotLabel?: string | null;
+  /** Etykieta odległości („1,2 km") — listingi geo; DM Mono na karcie. */
+  distanceLabel?: string;
   locale?: Locale;
 }) {
   const t = createTranslator(locale);
@@ -73,7 +76,16 @@ export function RestaurantCard({
             </div>
           </div>
           <div className="mt-[3px] text-xs text-muted-foreground">
-            {address} · {t("rest.restaurant")}
+            {address}
+            {distanceLabel ? (
+              <>
+                {" · "}
+                <span className="font-mono text-[11px] font-medium">
+                  {distanceLabel}
+                </span>
+              </>
+            ) : null}{" "}
+            · {t("rest.restaurant")}
           </div>
           <div className="mt-[11px] md:mt-auto md:pt-[11px]">{slot("pill")}</div>
         </div>
@@ -97,6 +109,14 @@ export function RestaurantCard({
         </div>
         <div className="mt-0.5 text-xs text-muted-foreground md:mt-[3px]">
           {address ? `${address} · ` : ""}
+          {distanceLabel ? (
+            <>
+              <span className="font-mono text-[11px] font-medium">
+                {distanceLabel}
+              </span>
+              {" · "}
+            </>
+          ) : null}
           {business.rating.score} ({business.rating.count})
         </div>
         <div className="mt-1.5 md:mt-auto md:pt-2">{slot("text")}</div>

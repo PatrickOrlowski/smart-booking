@@ -59,8 +59,21 @@ export const pl = {
   "home.empty.clear": "Wyczyść wyszukiwanie",
   "home.nearestFree": "Najbliższy wolny:",
   "home.noneThisWeek": "brak w tym tygodniu",
+  "home.empty.geoText":
+    "W Twojej okolicy nie ma jeszcze firm z rezerwacją online. Spróbuj wyszukać po nazwie albo mieście.",
   "search.placeholder": "Barber, fryzjer, miasto…",
   "search.aria": "Szukaj firmy lub miasta",
+
+  // --- geolokalizacja („W pobliżu") ----------------------------------------
+  "geo.useLocation": "Użyj mojej lokalizacji",
+  "geo.locating": "Ustalanie pozycji…",
+  "geo.clear": "Wyłącz lokalizację",
+  "geo.error.denied":
+    "Brak zgody na lokalizację — pokazujemy listę domyślną. Zmień uprawnienia w przeglądarce i spróbuj ponownie.",
+  "geo.error.unavailable":
+    "Nie udało się ustalić pozycji — pokazujemy listę domyślną.",
+  "geo.error.unsupported": "Twoja przeglądarka nie udostępnia lokalizacji.",
+  "geo.chipHint": "Najpierw włącz swoją lokalizację",
 
   // --- liczebniki ----------------------------------------------------------
   "plural.results.one": "1 wynik",
@@ -91,6 +104,8 @@ export const pl = {
   "format.priceFree": "gratis",
   "format.priceOnRequest": "na zapytanie",
   "format.tableSlot": "Stolik {day} od {time}",
+  "format.distanceKm": "{km} km",
+  "format.distanceM": "{m} m",
 
   // --- pastylka dostępności ------------------------------------------------
   "pill.nearest": "Najbliższy wolny termin: {label}",
@@ -531,6 +546,7 @@ export const pl = {
   "city.label": "Miasto",
   "city.heading": "Salony i usługi {inCity}",
   "city.subtitle": "Zarezerwuj wizytę online — sprawdź opinie, cennik i wolne terminy bez dzwonienia.",
+  "city.closest": "Najbliżej centrum",
   "city.empty.title1": "Jeszcze tu",
   "city.empty.title2": "nie jesteśmy.",
   "city.empty.text": "Brak aktywnych firm w tym mieście. Sprawdź wyszukiwarkę — nowe salony dochodzą co tydzień.",
@@ -543,6 +559,25 @@ export const pl = {
   "listing.goToSearch": "Przejdź do wyszukiwarki",
   "listing.showingOf": "Pokazujemy {shown} z {total} firm.",
   "listing.narrow": "Zawęź wyniki w wyszukiwarce",
+
+  // --- Konto: powiadomienia push -------------------------------------------
+  "konto.notif.label": "Powiadomienia",
+  "konto.notif.title": "Powiadomienia push",
+  "konto.notif.text":
+    "Przypomnienie o wizycie ~24 h przed terminem, prosto na to urządzenie.",
+  "konto.notif.soon": "Wkrótce",
+  "konto.notif.soonText":
+    "Pracujemy nad powiadomieniami push — pojawią się tu niebawem.",
+  "konto.notif.unsupported":
+    "Twoja przeglądarka nie obsługuje powiadomień push.",
+  "konto.notif.denied":
+    "Powiadomienia są zablokowane w ustawieniach przeglądarki — odblokuj je dla tej strony, żeby włączyć przypomnienia.",
+  "konto.notif.on": "Włączone na tym urządzeniu",
+  "konto.notif.enable": "Włącz powiadomienia",
+  "konto.notif.disable": "Wyłącz",
+  "konto.notif.pending": "Chwileczkę…",
+  "konto.notif.error":
+    "Nie udało się zmienić ustawień powiadomień. Spróbuj ponownie.",
 
   // --- 404 -----------------------------------------------------------------
   "nf.label": "Błąd 404",

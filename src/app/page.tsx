@@ -2,31 +2,39 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
 import { prisma } from "@/lib/prisma";
+import { MAX_RADIUS_KM, findBusinessesNearby } from "@/lib/geo";
 import { getNearestSlot } from "@/lib/availability-data";
-import { AvailabilityPill } from "@/components/marketplace/availability-pill";
-import { resultsCountLabel } from "@/components/marketplace/business-card";
+import {
+  BusinessCard,
+  resultsCountLabel,
+  type RatingSummary,
+} from "@/components/marketplace/business-card";
 import { SearchInput } from "@/components/marketplace/search-input";
+import { NearbyButton } from "@/components/marketplace/geo/nearby-button";
+import { DistanceChip } from "@/components/marketplace/geo/distance-chip";
+import { parseCoordinate } from "@/components/marketplace/geo/coords";
 import { SiteFooter } from "@/components/marketplace/site-footer";
 import { SiteHeader } from "@/components/marketplace/site-header";
 import { RestaurantCard } from "@/components/restaurant/restaurant-card";
 import { getNearestTableSlot } from "@/components/restaurant/nearest-table";
 import { tableSlotLabel } from "@/components/restaurant/format";
 import {
-  formatPrice,
+  distanceLabel,
   nearestSlotLabel,
 } from "@/components/marketplace/format";
 import { LocaleProvider } from "@/i18n/client";
 import { getTranslations } from "@/i18n/server";
 import type { MessageKey } from "@/i18n";
+import type { BusinessType } from "@/generated/prisma/enums";
 
 // Dostępność zależy od „teraz" — strona nie może być statyczna.
 export const dynamic = "force-dynamic";
 
-const FILTER_CHIP_KEYS: MessageKey[] = [
+/** Chipy bez chipa odległości — ten jest interaktywny (DistanceChip). */
+const STATIC_CHIP_KEYS: MessageKey[] = [
   "home.chip.today",
   "home.chip.rating",
   "home.chip.price",
-  "home.chip.distance",
 ];
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -91,7 +99,7 @@ async function findBusinesses(q: string | undefined) {
 const ratingLabel = (
   reviews: { rating: number }[],
   separator: string,
-): { score: string; count: number } => {
+): RatingSummary => {
   if (reviews.length === 0) return { score: `5${separator}0`, count: 0 };
   const average =
     reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length;
@@ -101,21 +109,75 @@ const ratingLabel = (
   };
 };
 
+/** Wspólny kształt karty dla listy domyślnej i trybu „w pobliżu". */
+type ListingItem = {
+  id: string;
+  slug: string;
+  name: string;
+  type: BusinessType;
+  locations: { addressLine1: string; city: string; timezone: string }[];
+  services: { priceCents: number; currency: string }[];
+  rating: RatingSummary;
+  /** Tylko tryb geo — etykieta „1,2 km" / „850 m" na karcie. */
+  distanceLabel?: string;
+};
+
 export default async function Home({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string }>;
+  searchParams: Promise<{
+    q?: string;
+    lat?: string;
+    lng?: string;
+    maxKm?: string;
+  }>;
 }) {
-  const { q } = await searchParams;
+  const { q, lat, lng, maxKm } = await searchParams;
   const query = q?.trim() || undefined;
   const { locale, t } = await getTranslations();
   const decimalSeparator = locale === "pl" ? "," : ".";
 
-  const businesses = await findBusinesses(query);
+  const originLat = parseCoordinate(lat, 90);
+  const originLng = parseCoordinate(lng, 180);
+  const origin =
+    originLat !== null && originLng !== null
+      ? { lat: originLat, lng: originLng }
+      : null;
+  // Chip „< 2 km" ustawia ?maxKm=2 — filtr działa tylko przy znanej pozycji.
+  const maxDistanceKm =
+    origin && maxKm && Number.isFinite(Number(maxKm)) && Number(maxKm) > 0
+      ? Math.min(Number(maxKm), MAX_RADIUS_KM)
+      : null;
+
+  let items: ListingItem[];
+  if (origin) {
+    const nearby = await findBusinessesNearby({
+      ...origin,
+      radiusKm: MAX_RADIUS_KM,
+      limit: 20,
+      query,
+    });
+    items = nearby
+      .filter(
+        (business) =>
+          maxDistanceKm === null || business.distanceKm < maxDistanceKm,
+      )
+      .map((business) => ({
+        ...business,
+        rating: ratingLabel(business.reviews, decimalSeparator),
+        distanceLabel: distanceLabel(business.distanceKm, locale),
+      }));
+  } else {
+    items = (await findBusinesses(query)).map((business) => ({
+      ...business,
+      rating: ratingLabel(business.reviews, decimalSeparator),
+    }));
+  }
+
   // Restauracja nie ma „najbliższego wolnego terminu" usługi — ma najbliższy
   // wolny STOLIK, liczony zupełnie innym silnikiem (turn time, pacing).
   const nearestSlots = await Promise.all(
-    businesses.map((business) =>
+    items.map((business) =>
       (business.type === "RESTAURANT"
         ? getNearestTableSlot(business.slug)
         : getNearestSlot(business.slug)
@@ -143,15 +205,19 @@ export default async function Home({
         {t("home.heading2")}
       </h1>
 
-      <div className="lg:mb-7 lg:flex lg:items-center lg:gap-3">
+      <div className="lg:mb-7 lg:flex lg:items-start lg:gap-3">
         <div className="lg:min-w-0 lg:max-w-md lg:flex-1">
           <Suspense>
             <SearchInput className="lg:mb-0" />
           </Suspense>
         </div>
 
-        <div className="mb-[22px] flex gap-2 overflow-x-auto pb-1 lg:mb-0 lg:flex-none lg:overflow-visible lg:pb-0">
-          {FILTER_CHIP_KEYS.map((chipKey, index) => (
+        <Suspense>
+          <NearbyButton className="mb-3.5 lg:mb-0 lg:flex-none" />
+        </Suspense>
+
+        <div className="mb-[22px] flex gap-2 overflow-x-auto pb-1 lg:mb-0 lg:min-h-11 lg:flex-none lg:items-center lg:overflow-visible lg:pb-0">
+          {STATIC_CHIP_KEYS.map((chipKey, index) => (
             <span
               key={chipKey}
               className={
@@ -163,6 +229,9 @@ export default async function Home({
               {t(chipKey)}
             </span>
           ))}
+          <Suspense>
+            <DistanceChip />
+          </Suspense>
         </div>
       </div>
 
@@ -172,11 +241,11 @@ export default async function Home({
         </h2>
         <span className="font-mono text-[11px] text-muted-foreground">
           {/* Jedna reguła liczebnika dla wszystkich listingów — Intl.PluralRules. */}
-          {resultsCountLabel(businesses.length, locale)}
+          {resultsCountLabel(items.length, locale)}
         </span>
       </div>
 
-      {businesses.length === 0 ? (
+      {items.length === 0 ? (
         <div className="mx-auto max-w-md py-14 text-center">
           <h2 className="mb-2 font-display text-[27px] leading-tight font-extrabold tracking-tight">
             {t("home.empty.title1")}
@@ -184,7 +253,9 @@ export default async function Home({
             {t("home.empty.title2")}
           </h2>
           <p className="mx-auto mb-6 max-w-[260px] text-[13px] leading-relaxed text-muted-foreground">
-            {t("home.empty.text", { query: query ?? "" })}
+            {origin && !query
+              ? t("home.empty.geoText")
+              : t("home.empty.text", { query: query ?? "" })}
           </p>
           <Link
             href="/"
@@ -195,22 +266,17 @@ export default async function Home({
         </div>
       ) : (
         <div className="flex flex-col gap-3.5 md:grid md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-5">
-          {businesses.map((business, index) => {
-            const location = business.locations[0];
+          {items.map((business, index) => {
             const nearest = nearestSlots[index];
-            const rating = ratingLabel(business.reviews, decimalSeparator);
-            const priceFrom = business.services[0];
-            const slotLabel = nearest
-              ? nearestSlotLabel(nearest.startAt, nearest.timezone, locale)
-              : null;
 
             if (business.type === "RESTAURANT") {
               return (
                 <RestaurantCard
                   key={business.id}
-                  business={{ ...business, rating }}
+                  business={business}
                   promoted={index === 0}
                   locale={locale}
+                  distanceLabel={business.distanceLabel}
                   slotLabel={
                     nearest
                       ? tableSlotLabel(nearest.startAt, nearest.timezone, locale)
@@ -220,72 +286,19 @@ export default async function Home({
               );
             }
 
-            if (index === 0) {
-              // Wynik promowany — pełna karta z obrysem border-strong.
-              return (
-                <Link
-                  key={business.id}
-                  href={`/b/${business.slug}`}
-                  className="block overflow-hidden rounded-2xl border-[1.5px] border-border-strong bg-card md:flex md:flex-col"
-                >
-                  <div className="photo-placeholder flex h-28 flex-none items-center justify-center font-mono text-[10px] tracking-[0.08em] text-[#8f8b81]">
-                    {t("common.photo169")}
-                  </div>
-                  <div className="px-[15px] pt-[13px] pb-[15px] md:flex md:flex-1 md:flex-col">
-                    <div className="flex items-start justify-between gap-2.5">
-                      <div className="font-display text-[17px] font-bold tracking-tight">
-                        {business.name}
-                      </div>
-                      <div className="flex-none font-mono text-xs font-medium">
-                        {rating.score}{" "}
-                        <span className="text-[#8f8b81]">({rating.count})</span>
-                      </div>
-                    </div>
-                    <div className="mt-[3px] text-xs text-muted-foreground">
-                      {location
-                        ? `${location.addressLine1}, ${location.city}`
-                        : ""}
-                      {priceFrom
-                        ? ` · ${t("format.priceFrom", { price: formatPrice(priceFrom.priceCents, priceFrom.currency, locale) })}`
-                        : ""}
-                    </div>
-                    <div className="mt-[11px] md:mt-auto md:pt-[11px]">
-                      <AvailabilityPill label={slotLabel} locale={locale} />
-                    </div>
-                  </div>
-                </Link>
-              );
-            }
-
             return (
-              <Link
+              <BusinessCard
                 key={business.id}
-                href={`/b/${business.slug}`}
-                className="flex items-center gap-[13px] rounded-2xl border border-border bg-card px-[15px] py-[13px] md:flex-col md:items-stretch md:gap-0 md:overflow-hidden md:p-0"
-              >
-                <div className="photo-placeholder flex size-[62px] flex-none items-center justify-center rounded-xl md:h-28 md:w-full md:rounded-none">
-                  <span className="hidden font-mono text-[10px] tracking-[0.08em] text-[#8f8b81] md:block">
-                    {t("common.photo")}
-                  </span>
-                </div>
-                <div className="min-w-0 md:flex md:flex-1 md:flex-col md:px-[15px] md:pt-[13px] md:pb-[15px]">
-                  <div className="font-display text-base font-bold tracking-tight md:text-[17px]">
-                    {business.name}
-                  </div>
-                  <div className="mt-0.5 text-xs text-muted-foreground md:mt-[3px]">
-                    {location
-                      ? `${location.addressLine1}, ${location.city} · `
-                      : ""}
-                    {rating.score} ({rating.count})
-                  </div>
-                  <div className="mt-1.5 text-xs text-muted-foreground md:mt-auto md:pt-2">
-                    {t("home.nearestFree")}{" "}
-                    <span className="font-semibold text-foreground">
-                      {slotLabel ?? t("home.noneThisWeek")}
-                    </span>
-                  </div>
-                </div>
-              </Link>
+                business={business}
+                promoted={index === 0}
+                locale={locale}
+                distanceLabel={business.distanceLabel}
+                slotLabel={
+                  nearest
+                    ? nearestSlotLabel(nearest.startAt, nearest.timezone, locale)
+                    : null
+                }
+              />
             );
           })}
         </div>

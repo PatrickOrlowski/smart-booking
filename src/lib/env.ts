@@ -23,6 +23,13 @@ const serverEnvSchema = z.object({
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
   NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: z.string().optional(),
+  /// SMSAPI — bez tokenu SMS-y są logowane w notifications jako SKIPPED.
+  SMSAPI_TOKEN: z.string().optional(),
+  SMS_FROM: z.string().default("Planner"),
+  /// Web Push (VAPID) — bez kluczy push jest wyłączony w UI.
+  VAPID_PRIVATE_KEY: z.string().optional(),
+  NEXT_PUBLIC_VAPID_PUBLIC_KEY: z.string().optional(),
+  VAPID_SUBJECT: z.string().default("mailto:kontakt@planner.pl"),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

@@ -58,8 +58,21 @@ export const en: Record<keyof typeof pl, string> = {
   "home.empty.clear": "Clear search",
   "home.nearestFree": "Next available:",
   "home.noneThisWeek": "none this week",
+  "home.empty.geoText":
+    "No businesses with online booking near you yet. Try searching by name or city.",
   "search.placeholder": "Barber, hairdresser, city…",
   "search.aria": "Search for a business or city",
+
+  // --- geolocation ("Nearby") ------------------------------------------------
+  "geo.useLocation": "Use my location",
+  "geo.locating": "Locating…",
+  "geo.clear": "Turn off location",
+  "geo.error.denied":
+    "Location permission denied — showing the default list. Change your browser settings and try again.",
+  "geo.error.unavailable":
+    "We couldn't determine your position — showing the default list.",
+  "geo.error.unsupported": "Your browser doesn't support location.",
+  "geo.chipHint": "Turn on your location first",
 
   // --- plurals --------------------------------------------------------------
   "plural.results.one": "1 result",
@@ -90,6 +103,8 @@ export const en: Record<keyof typeof pl, string> = {
   "format.priceFree": "free",
   "format.priceOnRequest": "on request",
   "format.tableSlot": "Table {day} from {time}",
+  "format.distanceKm": "{km} km",
+  "format.distanceM": "{m} m",
 
   // --- availability pill ----------------------------------------------------
   "pill.nearest": "Next available slot: {label}",
@@ -525,6 +540,7 @@ export const en: Record<keyof typeof pl, string> = {
   "city.label": "City",
   "city.heading": "Salons and services {inCity}",
   "city.subtitle": "Book a visit online — check reviews, prices and free slots without calling.",
+  "city.closest": "Closest to the centre",
   "city.empty.title1": "We're not",
   "city.empty.title2": "here yet.",
   "city.empty.text": "No active businesses in this city. Try the search — new salons join every week.",
@@ -537,6 +553,23 @@ export const en: Record<keyof typeof pl, string> = {
   "listing.goToSearch": "Go to search",
   "listing.showingOf": "Showing {shown} of {total} businesses.",
   "listing.narrow": "Narrow the results in search",
+
+  // --- Account: push notifications --------------------------------------------------------------
+  "konto.notif.label": "Notifications",
+  "konto.notif.title": "Push notifications",
+  "konto.notif.text":
+    "A reminder ~24 h before your visit, straight to this device.",
+  "konto.notif.soon": "Coming soon",
+  "konto.notif.soonText":
+    "We're working on push notifications — they'll show up here soon.",
+  "konto.notif.unsupported": "Your browser doesn't support push notifications.",
+  "konto.notif.denied":
+    "Notifications are blocked in your browser settings — unblock them for this site to enable reminders.",
+  "konto.notif.on": "Enabled on this device",
+  "konto.notif.enable": "Enable notifications",
+  "konto.notif.disable": "Disable",
+  "konto.notif.pending": "One moment…",
+  "konto.notif.error": "Couldn't update notification settings. Please try again.",
 
   // --- 404 --------------------------------------------------------------------------------------
   "nf.label": "Error 404",

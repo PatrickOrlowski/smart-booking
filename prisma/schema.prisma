@@ -90,6 +90,8 @@ enum BookingSource {
 
 enum NotificationChannel {
   EMAIL
+  SMS
+  PUSH
 }
 
 enum NotificationStatus {
@@ -230,11 +232,12 @@ model User {
   /// Preferowany język interfejsu (faza 8). null = wykrywany z przeglądarki.
   locale           String?        @db.VarChar(5)
 
-  reviews         Review[]
-  favorites       Favorite[]
-  waitlistEntries WaitlistEntry[]
-  abuseReports    AbuseReport[]   @relation("AbuseReporter")
-  resolvedReports AbuseReport[]   @relation("AbuseResolver")
+  reviews           Review[]
+  favorites         Favorite[]
+  waitlistEntries   WaitlistEntry[]
+  abuseReports      AbuseReport[]      @relation("AbuseReporter")
+  resolvedReports   AbuseReport[]      @relation("AbuseResolver")
+  pushSubscriptions PushSubscription[]
 
   @@map("users")
 }
@@ -1133,6 +1136,24 @@ model ApiKey {
 
   @@index([businessId])
   @@map("api_keys")
+}
+
+/// Subskrypcja Web Push przeglądarki zalogowanego użytkownika.
+/// Endpoint jest unikalny globalnie (jedna przeglądarka = jeden wpis);
+/// wygaśnięcie (410 od push service) usuwa wiersz.
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
 }
 
 // ---------------------------------------------------------------------------
